@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Dict
 
-from .common import SlError, cleanup_policy, command_dirs, info, job_id, local_job_dir, read_json, remote_job_dir, remote_root, runtime_ref, runtime_repo, sl_config, ssh, ssh_argv, state_dir, validate_job_id, warn, write_json
+from .common import SlError, cleanup_policy, command_dirs, info, job_id, local_job_dir, read_json, remote_job_dir, remote_root, runtime_ref, runtime_repo, sl_config, ssh, ssh_argv, state_dir, validate_job_id, validate_output_dir, verbosity, warn, write_json
 from .memory import format_memory_mib, preflight_capacity
 from .remote import clean_remote_job, fetch_outputs, follow_remote_log, launch_job, load_manifest, local_status, mark_complete, prepare_remote_job, purge_job, remote_status, stage_inputs, sync_metadata
 from .spec import CommandSpec, build_arg_values, build_run_script, find_command, manifest_for_job, parse_command
@@ -16,6 +16,8 @@ from .spec import CommandSpec, build_arg_values, build_run_script, find_command,
 def run_job(args: argparse.Namespace) -> int:
     cfg = sl_config(); ssh_argv()
     spec = find_command(args.command, cfg)
+    mode = verbosity(cfg, getattr(args, "verbosity", None))
+    output_dir = validate_output_dir(Path(args.output_dir) if args.output_dir else Path("."))
     requested_mem = args.mem
     if requested_mem is not None and not spec.memcheck:
         raise SlError(f"command {spec.name} does not declare '# sl:memcheck'; refusing --mem")
@@ -29,40 +31,48 @@ def run_job(args: argparse.Namespace) -> int:
 
     operands = list(args.operands)
     jid = job_id(); root = remote_root(cfg)
-    output_dir = Path(args.output_dir).expanduser() if args.output_dir else Path(".")
     values = build_arg_values(spec, operands, root, jid)
     manifest = manifest_for_job(job_id=jid, spec=spec, operands=operands, extra_args=args.extra, output_dir=output_dir, remote_root=root, arg_values=values)
     manifest["memory"] = {"memcheck": spec.memcheck, "requested": requested_mem, "required_mib": memory_mib}
+    manifest["verbosity"] = mode
     local = local_job_dir(jid, cfg); local.mkdir(parents=True, exist_ok=True)
     write_json(local / "manifest.json", manifest); write_json(local / "status.json", {"state": "CREATED", "exit_code": None})
     runner = build_run_script(job_id=jid, spec=spec, arg_values=values, extra_args=args.extra, remote_root=root,
-                              runtime_repo=runtime_repo(cfg), runtime_ref=runtime_ref(cfg), memory_mib=memory_mib)
+                              runtime_repo=runtime_repo(cfg), runtime_ref=runtime_ref(cfg), memory_mib=memory_mib,
+                              verbosity_mode=mode)
     info(f"job: {jid}"); info(f"command: {spec.name}")
     if memory_mib is not None: info(f"memory gate: require {format_memory_mib(memory_mib)} free GPU VRAM")
     prepare_remote_job(jid, spec, manifest, runner, cfg)
     try:
-        stage_inputs(jid, spec, operands, cfg); pid = launch_job(jid, cfg)
+        stage_inputs(jid, spec, operands, cfg, verbosity_mode=mode); pid = launch_job(jid, cfg)
     except Exception:
         sync_metadata(jid, cfg); raise
     info(f"remote pid: {pid}")
     if args.detach:
         info(f"submitted: {jid}"); info(f"follow with: sl tail {jid}"); sync_metadata(jid, cfg); return 0
-    follow_remote_log(jid, cfg, lines="+1", follow=True)
-    return finalize_sync_job(jid, cfg, output_dir=output_dir, no_fetch=args.no_fetch, keep_remote=args.keep_remote)
+    follow_remote_log(jid, cfg, lines="+1", follow=True, display=mode != "full")
+    return finalize_sync_job(jid, cfg, output_dir=output_dir, no_fetch=args.no_fetch, keep_remote=args.keep_remote,
+                             verbosity_mode=mode)
 
 
-def finalize_sync_job(jid: str, cfg: dict, *, output_dir: Path | None, no_fetch: bool, keep_remote: bool) -> int:
+def finalize_sync_job(jid: str, cfg: dict, *, output_dir: Path | None, no_fetch: bool, keep_remote: bool,
+                      verbosity_mode: str | None = None) -> int:
     sync_metadata(jid, cfg)
     status = remote_status(jid, cfg, allow_missing=True) or local_status(jid, cfg) or {}
     state, exit_code = str(status.get("state") or "UNKNOWN"), status.get("exit_code")
     manifest = load_manifest(jid, cfg); has_outputs = bool(manifest.get("outputs")); fetched = False
+    fetched_paths: list[Path] = []
     if state == "SUCCEEDED" and not no_fetch:
-        info("job succeeded; fetching outputs"); fetch_outputs(jid, cfg, output_dir); fetched = True; mark_complete(jid, cfg); sync_metadata(jid, cfg); state = "COMPLETE"
+        info("job succeeded; fetching outputs")
+        fetched_paths = fetch_outputs(jid, cfg, output_dir, verbosity_mode=verbosity_mode)
+        fetched = True; mark_complete(jid, cfg); sync_metadata(jid, cfg); state = "COMPLETE"
     policy = cleanup_policy(cfg)
     cleanup_ok = state in {"SUCCEEDED", "COMPLETE"} and (fetched or not has_outputs)
     if not keep_remote and (policy == "always" or (policy == "successful" and cleanup_ok)):
         clean_remote_job(jid, cfg)
     if state in {"SUCCEEDED", "COMPLETE"}:
+        for path in fetched_paths:
+            info(f"output: {path}")
         info(f"job {jid}: {state}"); return 0
     info(f"job {jid}: {state} (exit {exit_code})")
     return int(exit_code) if isinstance(exit_code, int) and exit_code else 1
@@ -108,7 +118,7 @@ def status(jid: str, cfg: dict) -> int:
     else: st=local_status(jid, cfg)
     if st is None: raise SlError(f"job not found: {jid}")
     manifest=load_manifest(jid, cfg)
-    print(f"job:       {jid}\ncommand:   {manifest.get('command','?')}\nstate:     {st.get('state','?')}\nexit:      {st.get('exit_code') if st.get('exit_code') is not None else '-'}\ncreated:   {manifest.get('created_at','-')}\noutput:    {manifest.get('local_output_dir','-')}")
+    print(f"job:       {jid}\ncommand:   {manifest.get('command','?')}\nstate:     {st.get('state','?')}\nexit:      {st.get('exit_code') if st.get('exit_code') is not None else '-'}\ncreated:   {manifest.get('created_at','-')}\noutput:    {manifest.get('local_output_dir','-')}\nverbosity: {manifest.get('verbosity','-')}")
     memory = manifest.get("memory") if isinstance(manifest.get("memory"), dict) else {}
     required = st.get("memory_required_mib") if isinstance(st.get("memory_required_mib"), int) else memory.get("required_mib")
     free = st.get("memory_free_mib") if isinstance(st.get("memory_free_mib"), int) else None
