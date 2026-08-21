@@ -175,7 +175,8 @@ def manifest_for_job(*, job_id: str, spec: CommandSpec, operands: Sequence[str],
 
 
 def build_run_script(*, job_id: str, spec: CommandSpec, arg_values: Dict[int, str], extra_args: Sequence[str],
-                     remote_root: str, runtime_repo: str, runtime_ref: str, memory_mib: int | None = None) -> str:
+                     remote_root: str, runtime_repo: str, runtime_ref: str, memory_mib: int | None = None,
+                     verbosity_mode: str = "run") -> str:
     job_dir = f"{remote_root}/jobs/{job_id}"
     cache_dir = f"{remote_root}/cache"
     runtime_dir = f"{remote_root}/runtime/pod-runtime"
@@ -198,7 +199,8 @@ export SL_COMMAND_NAME={shlex.quote(spec.name)}
 export SL_COMMAND_CACHE={shlex.quote(command_cache)}
 export SL_COMMAND_FILE="$SL_JOB_DIR/command.cmd"
 export SL_LOG_FILE="$SL_JOB_DIR/job.log"
-export SL_STATUS_FILE="$SL_JOB_DIR/status.json"
+export SL_DISPLAY_LOG="$SL_JOB_DIR/display.log"
+export SL_VERBOSITY={shlex.quote(verbosity_mode)}
 {os.linesep.join(arg_lines)}
 SL_EXTRA_ARGS=({extras})
 {memory_line}
@@ -206,7 +208,26 @@ export POD_RUNTIME_DIR="$SL_RUNTIME_DIR"
 export PYTHONUNBUFFERED=1
 
 _sl_now() {{ date -Is; }}
-_sl_log() {{ printf '%s [sl] %s\\n' "$(_sl_now)" "$*"; }}
+_sl_emit() {{
+  local level="$1"; shift
+  local line="$(_sl_now) [sl] $*"
+  printf '%s\\n' "$line"
+  if [[ "$SL_VERBOSITY" == "full" || "$SL_VERBOSITY" == "debug" || "$level" == "major" ]]; then
+    printf '%s\\n' "$line" >> "$SL_DISPLAY_LOG"
+  fi
+}}
+_sl_should_show_phase() {{
+  local phase="$1"
+  [[ "$SL_VERBOSITY" == "full" || "$SL_VERBOSITY" == "debug" || ( "$SL_VERBOSITY" == "run" && "$phase" == "RUN" ) ]]
+}}
+_sl_phase() {{
+  local phase="$1"; shift
+  if _sl_should_show_phase "$phase"; then
+    "$@" > >(tee -a "$SL_DISPLAY_LOG") 2> >(tee -a "$SL_DISPLAY_LOG" >&2)
+  else
+    "$@"
+  fi
+}}
 _sl_status() {{
   local state="$1" code="${{2:-}}" started completed
   started="$(cat "$SL_JOB_DIR/started_at" 2>/dev/null || true)"
@@ -236,28 +257,28 @@ _sl_wait_for_memory() {{
   local required="${{SL_MEMORY_REQUIRED_MIB:-}}" total free now last_log=0
   [[ -n "$required" ]] || return 0
   if ! command -v nvidia-smi >/dev/null 2>&1; then
-    _sl_log "ERROR: --mem requested but nvidia-smi is unavailable"; _sl_status FAILED 127; return 127
+    _sl_emit major "ERROR: --mem requested but nvidia-smi is unavailable"; _sl_status FAILED 127; return 127
   fi
   total="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
-  if [[ ! "$total" =~ ^[0-9]+$ ]]; then _sl_log "ERROR: could not query GPU memory total"; _sl_status FAILED 2; return 2; fi
-  if (( required > total )); then _sl_log "ERROR: memory requirement ${{required}} MiB exceeds GPU total ${{total}} MiB"; _sl_status FAILED 2; return 2; fi
-  _sl_log "memory gate enabled: require ${{required}} MiB free GPU VRAM (GPU total ${{total}} MiB)"
+  if [[ ! "$total" =~ ^[0-9]+$ ]]; then _sl_emit major "ERROR: could not query GPU memory total"; _sl_status FAILED 2; return 2; fi
+  if (( required > total )); then _sl_emit major "ERROR: memory requirement ${{required}} MiB exceeds GPU total ${{total}} MiB"; _sl_status FAILED 2; return 2; fi
+  _sl_emit major "memory gate enabled: require ${{required}} MiB free GPU VRAM (GPU total ${{total}} MiB)"
   while :; do
     free="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
-    if [[ ! "$free" =~ ^[0-9]+$ ]]; then _sl_log "ERROR: could not query free GPU memory"; _sl_status FAILED 2; return 2; fi
+    if [[ ! "$free" =~ ^[0-9]+$ ]]; then _sl_emit major "ERROR: could not query free GPU memory"; _sl_status FAILED 2; return 2; fi
     export SL_MEMORY_FREE_MIB="$free"
     _sl_status WAITING_FOR_MEMORY
-    if (( free >= required )); then _sl_log "memory gate satisfied: ${{free}} MiB free >= ${{required}} MiB required"; return 0; fi
+    if (( free >= required )); then _sl_emit major "memory gate satisfied: ${{free}} MiB free >= ${{required}} MiB required"; return 0; fi
     now="$(date +%s)"
     if (( last_log == 0 || now - last_log >= 30 )); then
-      _sl_log "waiting for GPU memory: ${{free}} MiB free, ${{required}} MiB required"; last_log="$now"
+      _sl_emit major "waiting for GPU memory: ${{free}} MiB free, ${{required}} MiB required"; last_log="$now"
     fi
     sleep 5
   done
 }}
 
 _sl_status PREPARING
-_sl_log "job $SL_JOB_ID preparing command $SL_COMMAND_NAME"
+_sl_emit major "job $SL_JOB_ID preparing command $SL_COMMAND_NAME"
 
 for env_file in /etc/rp_environment /root/.secrets/env.current; do
   if [[ -f "$env_file" ]]; then set +u; source "$env_file"; set -u; fi
@@ -269,27 +290,28 @@ fi
 
 mkdir -p "$(dirname "$SL_RUNTIME_DIR")" "$SL_CACHE_DIR" "$SL_COMMAND_CACHE" "$SL_WORK_DIR"
 if [[ -d "$SL_RUNTIME_DIR/.git" ]]; then
-  _sl_log "refreshing pod-runtime snapshot ($SL_RUNTIME_DIR)"
+  _sl_emit debug "refreshing pod-runtime snapshot ($SL_RUNTIME_DIR)"
 else
-  _sl_log "shallow cloning pod-runtime"
+  _sl_emit debug "shallow cloning pod-runtime"
   rm -rf "$SL_RUNTIME_DIR"
   git clone --quiet --depth 1 --no-tags {shlex.quote(runtime_repo)} "$SL_RUNTIME_DIR"
 fi
 if ! git -C "$SL_RUNTIME_DIR" fetch --quiet --depth 1 --no-tags origin {shlex.quote(runtime_ref)}; then
-  _sl_log "ERROR: could not fetch pod-runtime ref {runtime_ref}"; _sl_status FAILED 127; exit 127
+  _sl_emit major "ERROR: could not fetch pod-runtime ref {runtime_ref}"; _sl_status FAILED 127; exit 127
 fi
 git -C "$SL_RUNTIME_DIR" checkout --quiet --detach FETCH_HEAD
-if [[ ! -f "$SL_RUNTIME_DIR/helpers.sh" ]]; then _sl_log "ERROR: pod-runtime/helpers.sh unavailable"; _sl_status FAILED 127; exit 127; fi
+if [[ ! -f "$SL_RUNTIME_DIR/helpers.sh" ]]; then _sl_emit major "ERROR: pod-runtime/helpers.sh unavailable"; _sl_status FAILED 127; exit 127; fi
 export repo_root="$SL_RUNTIME_DIR"
 set +u
 source "$SL_RUNTIME_DIR/helpers.sh"
 set -u
-_sl_log "pod-runtime helper stack loaded: $SL_RUNTIME_DIR"
+_sl_emit debug "pod-runtime helper stack loaded: $SL_RUNTIME_DIR"
 
 source "$SL_COMMAND_FILE"
 if declare -F sl_prepare >/dev/null 2>&1; then
-  _sl_log "preparing command runtime"; sl_prepare; rc=$?
-  if [[ $rc -ne 0 ]]; then _sl_log "ERROR: sl_prepare failed with exit $rc"; _sl_status FAILED "$rc"; exit "$rc"; fi
+  _sl_emit debug "preparing command runtime"
+  _sl_phase PREPARE sl_prepare; rc=$?
+  if [[ $rc -ne 0 ]]; then _sl_emit major "ERROR: sl_prepare failed with exit $rc"; _sl_status FAILED "$rc"; exit "$rc"; fi
 fi
 
 setup_version={shlex.quote(spec.setup_version)}
@@ -297,19 +319,20 @@ setup_marker="$SL_COMMAND_CACHE/setup.version"
 if declare -F sl_setup >/dev/null 2>&1; then
   current="$(cat "$setup_marker" 2>/dev/null || true)"
   if [[ "$current" != "$setup_version" ]]; then
-    _sl_log "cold setup for $SL_COMMAND_NAME (version $setup_version)"; sl_setup; rc=$?
-    if [[ $rc -ne 0 ]]; then _sl_log "ERROR: sl_setup failed with exit $rc"; _sl_status FAILED "$rc"; exit "$rc"; fi
+    _sl_emit debug "cold setup for $SL_COMMAND_NAME (version $setup_version)"
+    _sl_phase SETUP sl_setup; rc=$?
+    if [[ $rc -ne 0 ]]; then _sl_emit major "ERROR: sl_setup failed with exit $rc"; _sl_status FAILED "$rc"; exit "$rc"; fi
     printf '%s\\n' "$setup_version" > "$setup_marker"
   else
-    _sl_log "warm setup cache hit for $SL_COMMAND_NAME (version $setup_version)"
+    _sl_emit debug "warm setup cache hit for $SL_COMMAND_NAME (version $setup_version)"
   fi
 fi
 
 _sl_wait_for_memory; rc=$?; [[ $rc -eq 0 ]] || exit "$rc"
 _sl_status RUNNING
-_sl_log "running command"
-sl_run; rc=$?
-if [[ $rc -eq 0 ]]; then _sl_log "command completed successfully"; _sl_status SUCCEEDED 0
-else _sl_log "command failed with exit $rc"; _sl_status FAILED "$rc"; fi
+_sl_emit major "running command"
+_sl_phase RUN sl_run; rc=$?
+if [[ $rc -eq 0 ]]; then _sl_emit major "command completed successfully"; _sl_status SUCCEEDED 0
+else _sl_emit major "command failed with exit $rc"; _sl_status FAILED "$rc"; fi
 exit "$rc"
 '''
