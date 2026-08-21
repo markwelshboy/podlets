@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -19,6 +20,8 @@ VCP_CONFIG_PATH = Path(os.environ.get("VCP_CONFIG", "~/.config/vcp/config.json")
 DEFAULT_STATE_DIR = Path(os.environ.get("SL_STATE_DIR", "~/.local/state/sl/jobs")).expanduser()
 DEFAULT_RUNTIME_REPO = "https://github.com/markwelshboy/pod-runtime.git"
 DEFAULT_RUNTIME_REF = "main"
+DEFAULT_VERBOSITY = "run"
+VERBOSITY_LEVELS = {"none", "run", "debug", "full"}
 TERMINAL_STATES = {"SUCCEEDED", "FAILED", "COMPLETE"}
 ACTIVE_STATES = {"CREATED", "STAGING", "PREPARING", "WAITING_FOR_MEMORY", "RUNNING", "FETCHING"}
 DIRECTIVE_RE = re.compile(r"^\s*#\s*sl:([a-zA-Z0-9_-]+)(?:\s+(.*?))?\s*$")
@@ -123,6 +126,14 @@ def cleanup_policy(cfg: dict | None = None) -> str:
     return value
 
 
+def verbosity(cfg: dict | None = None, override: str | None = None) -> str:
+    cfg = sl_config() if cfg is None else cfg
+    value = override or os.environ.get("SL_VERBOSITY") or cfg.get("verbosity") or DEFAULT_VERBOSITY
+    if value not in VERBOSITY_LEVELS:
+        raise SlError(f"invalid verbosity: {value}; expected none|run|debug|full")
+    return str(value)
+
+
 def runtime_repo(cfg: dict | None = None) -> str:
     cfg = sl_config() if cfg is None else cfg
     return str(cfg.get("runtime_repo") or DEFAULT_RUNTIME_REPO)
@@ -131,6 +142,29 @@ def runtime_repo(cfg: dict | None = None) -> str:
 def runtime_ref(cfg: dict | None = None) -> str:
     cfg = sl_config() if cfg is None else cfg
     return str(cfg.get("runtime_ref") or DEFAULT_RUNTIME_REF)
+
+
+def validate_output_dir(path: Path) -> Path:
+    requested = path.expanduser()
+    resolved = requested.resolve()
+    if not resolved.exists():
+        raise SlError(f"output directory does not exist: {requested} (resolved: {resolved})")
+    if not resolved.is_dir():
+        raise SlError(f"output directory is not a directory: {resolved}")
+    probe: Path | None = None
+    try:
+        fd, name = tempfile.mkstemp(prefix=".sl-write-test-", dir=resolved)
+        os.close(fd)
+        probe = Path(name)
+    except OSError as exc:
+        raise SlError(f"output directory is not writable: {resolved}: {exc}") from exc
+    finally:
+        if probe is not None:
+            try:
+                probe.unlink()
+            except FileNotFoundError:
+                pass
+    return resolved
 
 
 def vcp_path(cfg: dict | None = None) -> Path:
@@ -168,8 +202,32 @@ def ssh(script: str, *, capture: bool = False, check: bool = True) -> subprocess
     return run_process(["ssh", *ssh_argv(), "bash", "-s"], check=check, capture=capture, input_text=script)
 
 
-def vcp(args: Sequence[str], cfg: dict | None = None) -> None:
-    run_process([str(vcp_path(cfg)), *args])
+def vcp(
+    args: Sequence[str], cfg: dict | None = None, *, verbosity_mode: str | None = None,
+    log_path: Path | None = None,
+) -> None:
+    mode = verbosity(cfg, verbosity_mode)
+    cmd = [str(vcp_path(cfg)), *args]
+    if mode == "full":
+        run_process(cmd)
+        return
+    result = run_process(cmd, check=False, capture=True)
+    if log_path is not None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"$ {' '.join(cmd)}\n")
+            if result.stdout:
+                fh.write(result.stdout)
+                if not result.stdout.endswith("\n"):
+                    fh.write("\n")
+            if result.stderr:
+                fh.write(result.stderr)
+                if not result.stderr.endswith("\n"):
+                    fh.write("\n")
+            fh.write(f"[exit {result.returncode}]\n\n")
+    if result.returncode != 0:
+        where = f"; see {log_path}" if log_path is not None else ""
+        raise SlError(f"vcp failed with exit {result.returncode}{where}")
 
 
 def job_id() -> str:
