@@ -29,6 +29,14 @@ class Phase1Tests(unittest.TestCase):
                 with self.assertRaises(common.SlError): spec.validate_output_arg(value)
         self.assertEqual(spec.validate_output_arg("results/run1/"),"results/run1")
 
+    def test_output_directory_must_exist_and_be_writable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            self.assertEqual(common.validate_output_dir(root),root.resolve())
+            with self.assertRaises(common.SlError): common.validate_output_dir(root/"missing")
+            file_path=root/"not-a-dir"; file_path.write_text("x")
+            with self.assertRaises(common.SlError): common.validate_output_dir(file_path)
+
     def test_build_arg_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             source=Path(tmp)/"images"; source.mkdir()
@@ -75,24 +83,34 @@ class Phase1Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cmd=Path(tmp)/"demo.cmd"; cmd.write_text("# sl:name demo\n# sl:memcheck\nsl_run() { :; }\n")
             command=spec.parse_command(cmd)
-            script=spec.build_run_script(job_id="20260821_120000_deadbeef",spec=command,arg_values={},extra_args=["--thing","value with spaces"],remote_root="/workspace/.sl",runtime_repo="https://example.invalid/pod-runtime.git",runtime_ref="main",memory_mib=18432)
+            script=spec.build_run_script(job_id="20260821_120000_deadbeef",spec=command,arg_values={},extra_args=["--thing","value with spaces"],remote_root="/workspace/.sl",runtime_repo="https://example.invalid/pod-runtime.git",runtime_ref="main",memory_mib=18432,verbosity_mode="debug")
         self.assertLess(script.index('source "$SL_RUNTIME_DIR/helpers.sh"'),script.index('source "$SL_COMMAND_FILE"'))
         self.assertIn("SL_EXTRA_ARGS=(--thing 'value with spaces')",script); self.assertNotIn("eval ",script)
-        self.assertLess(script.index("_sl_wait_for_memory;"),script.index('sl_run; rc=$?'))
+        self.assertLess(script.index("_sl_wait_for_memory;"),script.index('_sl_phase RUN sl_run; rc=$?'))
         self.assertIn("git clone --quiet --depth 1 --no-tags",script)
         self.assertIn("fetch --quiet --depth 1 --no-tags origin main",script)
+        self.assertIn("export SL_VERBOSITY=debug",script)
+        self.assertIn("_sl_phase PREPARE sl_prepare",script)
+        self.assertIn("_sl_phase SETUP sl_setup",script)
+        self.assertIn("_sl_phase RUN sl_run",script)
 
     def test_generated_runner_is_valid_bash(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); cmd=root/"demo.cmd"; cmd.write_text("# sl:name demo\n# sl:memcheck\nsl_run() { :; }\n")
-            script=spec.build_run_script(job_id="20260821_120000_deadbeef",spec=spec.parse_command(cmd),arg_values={},extra_args=[],remote_root="/workspace/.sl",runtime_repo="https://example.invalid/pod-runtime.git",runtime_ref="main",memory_mib=1024)
+            script=spec.build_run_script(job_id="20260821_120000_deadbeef",spec=spec.parse_command(cmd),arg_values={},extra_args=[],remote_root="/workspace/.sl",runtime_repo="https://example.invalid/pod-runtime.git",runtime_ref="main",memory_mib=1024,verbosity_mode="run")
             runner=root/"run.sh"; runner.write_text(script)
             result=subprocess.run(["bash","-n",str(runner)],capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
 
     def test_run_parser_preserves_extra_argv(self):
-        ns=cli.parse_run(["--mem","18G","seedvr2","in","out","--","--config","a b.json","--seed","43"])
-        self.assertEqual(ns.mem,"18G"); self.assertEqual(ns.command,"seedvr2"); self.assertEqual(ns.operands,["in","out"]); self.assertEqual(ns.extra,["--config","a b.json","--seed","43"])
+        ns=cli.parse_run(["--mem","18G","--verbosity","debug","seedvr2","in","out","--","--config","a b.json","--seed","43"])
+        self.assertEqual(ns.mem,"18G"); self.assertEqual(ns.verbosity,"debug"); self.assertEqual(ns.command,"seedvr2"); self.assertEqual(ns.operands,["in","out"]); self.assertEqual(ns.extra,["--config","a b.json","--seed","43"])
+
+    def test_verbosity_defaults_and_validation(self):
+        self.assertEqual(common.verbosity({}),"run")
+        self.assertEqual(common.verbosity({},"none"),"none")
+        self.assertEqual(common.verbosity({},"full"),"full")
+        with self.assertRaises(common.SlError): common.verbosity({},"chatty")
 
     def test_alias_parser(self):
         ns=cli.parse_run(["in","out","--","--scale","2"],command_alias="seedvr2.cmd")
