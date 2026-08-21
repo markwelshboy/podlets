@@ -37,6 +37,40 @@ class Phase1Tests(unittest.TestCase):
             values=spec.build_arg_values(command,[str(source),"out/results"],"/workspace/.sl","20260821_120000_deadbeef")
         self.assertTrue(values[1].endswith("/input/arg1/images")); self.assertTrue(values[2].endswith("/output/out/results"))
 
+    def test_glob_input_stages_stable_root_and_preserves_pattern(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); source=root/"input"; source.mkdir(); (source/"one.png").write_text("x")
+            cmd=root/"demo.cmd"; cmd.write_text("# sl:name demo\n# sl:input 1\n# sl:output 2\nsl_run() { :; }\n")
+            command=spec.parse_command(cmd)
+            old=os.getcwd()
+            try:
+                os.chdir(root)
+                plan=spec.plan_input("input/*.png","/workspace/.sl/jobs/J/input/arg1")
+                values=spec.build_arg_values(command,["input/*.png","out"],"/workspace/.sl","20260821_120000_deadbeef")
+            finally:
+                os.chdir(old)
+        self.assertEqual(plan.stage_source,source.resolve())
+        self.assertTrue(plan.is_glob)
+        self.assertEqual(plan.remote_value,"/workspace/.sl/jobs/J/input/arg1/input/*.png")
+        self.assertTrue(values[1].endswith("/input/arg1/input/*.png"))
+
+    def test_glob_input_manifest_records_staging_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); source=root/"input"; source.mkdir()
+            cmd=root/"demo.cmd"; cmd.write_text("# sl:name demo\n# sl:input 1\n# sl:output 2\nsl_run() { :; }\n")
+            command=spec.parse_command(cmd)
+            old=os.getcwd()
+            try:
+                os.chdir(root)
+                values=spec.build_arg_values(command,["input/*.png","out"],"/workspace/.sl","20260821_120000_deadbeef")
+                manifest=spec.manifest_for_job(job_id="20260821_120000_deadbeef",spec=command,operands=["input/*.png","out"],extra_args=[],output_dir=root,remote_root="/workspace/.sl",arg_values=values)
+            finally:
+                os.chdir(old)
+        entry=manifest["inputs"][0]
+        self.assertEqual(entry["local"],"input/*.png")
+        self.assertEqual(entry["staged_from"],str(source.resolve()))
+        self.assertTrue(entry["glob"])
+
     def test_runner_loads_runtime_before_command_and_preserves_argv(self):
         with tempfile.TemporaryDirectory() as tmp:
             cmd=Path(tmp)/"demo.cmd"; cmd.write_text("# sl:name demo\n# sl:memcheck\nsl_run() { :; }\n")
@@ -45,6 +79,8 @@ class Phase1Tests(unittest.TestCase):
         self.assertLess(script.index('source "$SL_RUNTIME_DIR/helpers.sh"'),script.index('source "$SL_COMMAND_FILE"'))
         self.assertIn("SL_EXTRA_ARGS=(--thing 'value with spaces')",script); self.assertNotIn("eval ",script)
         self.assertLess(script.index("_sl_wait_for_memory;"),script.index('sl_run; rc=$?'))
+        self.assertIn("git clone --quiet --depth 1 --no-tags",script)
+        self.assertIn("fetch --quiet --depth 1 --no-tags origin main",script)
 
     def test_generated_runner_is_valid_bash(self):
         with tempfile.TemporaryDirectory() as tmp:
