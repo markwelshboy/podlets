@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Sequence
 
 from .common import ACTIVE_STATES, SlError, info, local_job_dir, read_json, remote_job_dir, ssh, vcp
-from .spec import CommandSpec
+from .spec import CommandSpec, plan_input
 
 
 def prepare_remote_job(job_id: str, spec: CommandSpec, manifest: dict, run_script: str, cfg: dict) -> None:
@@ -41,10 +41,14 @@ def stage_inputs(job_id: str, spec: CommandSpec, operands: Sequence[str], cfg: d
         return
     ssh(f"printf '%s\\n' '{{\"state\": \"STAGING\", \"exit_code\": null}}' > {shlex.quote(job_dir + '/status.json')}\n")
     for idx in spec.inputs:
-        local = str(Path(operands[idx - 1]).expanduser().resolve())
         remote_parent = f"{job_dir}/input/arg{idx}"
+        plan = plan_input(operands[idx - 1], remote_parent)
+        local = str(plan.stage_source)
         ssh(f"mkdir -p {shlex.quote(remote_parent)}\n")
-        info(f"staging input arg{idx}: {local}")
+        if plan.is_glob:
+            info(f"staging input arg{idx} root for glob {plan.raw!r}: {local}")
+        else:
+            info(f"staging input arg{idx}: {local}")
         vcp([local, f"r:{remote_parent}/"], cfg)
 
 
@@ -158,9 +162,9 @@ def load_manifest(job_id: str, cfg: dict) -> dict:
     try:
         value = json.loads(result.stdout or "{}")
     except json.JSONDecodeError as exc:
-        raise SlError(f"invalid manifest for job {job_id}") from exc
+        raise SlError(f"invalid manifest for {job_id}") from exc
     if not isinstance(value, dict):
-        raise SlError(f"invalid manifest for job {job_id}")
+        raise SlError(f"invalid manifest for {job_id}")
     return value
 
 
