@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import List, Sequence
 
-from .common import SL_CONFIG_PATH, VCP_CONFIG_PATH, SlError, cleanup_policy, command_dirs, remote_job_dir, remote_root, runtime_ref, runtime_repo, sl_config, ssh, ssh_argv, state_dir, validate_job_id, vcp_path, write_sl_config
+from .common import SL_CONFIG_PATH, VCP_CONFIG_PATH, SlError, cleanup_policy, command_dirs, remote_job_dir, remote_root, runtime_ref, runtime_repo, sl_config, ssh, ssh_argv, state_dir, validate_job_id, vcp_path, verbosity, write_sl_config
 from .jobs import command_show, commands, jobs, logs, run_job, status, tail
 from .memory import format_memory_mib, remote_gpu_memory
 from .remote import clean_remote_job, fetch_outputs, local_status, mark_complete, purge_job, remote_status, sync_metadata
@@ -22,7 +22,7 @@ def config_command(argv: Sequence[str]) -> int:
         except SlError: print("vcp:           <not found>")
         try: print(f"ssh:           {shlex.join(ssh_argv())}")
         except SlError: print("ssh:           <not configured>")
-        print(f"remote root:   {remote_root(cfg)}\ncommand dir:   {command_dirs(cfg)[0]}\nstate dir:     {state_dir(cfg)}\ncleanup:       {cleanup_policy(cfg)}\nruntime repo:  {runtime_repo(cfg)}\nruntime ref:   {runtime_ref(cfg)}")
+        print(f"remote root:   {remote_root(cfg)}\ncommand dir:   {command_dirs(cfg)[0]}\nstate dir:     {state_dir(cfg)}\ncleanup:       {cleanup_policy(cfg)}\nverbosity:     {verbosity(cfg)}\nruntime repo:  {runtime_repo(cfg)}\nruntime ref:   {runtime_ref(cfg)}")
         return 0
     action=argv[0]
     if action=="remote-root":
@@ -37,6 +37,9 @@ def config_command(argv: Sequence[str]) -> int:
     elif action=="cleanup":
         if len(argv)!=2 or argv[1] not in {"never","successful","always"}: raise SlError("usage: sl config cleanup never|successful|always")
         cfg["cleanup"]=argv[1]
+    elif action=="verbosity":
+        if len(argv)!=2 or argv[1] not in {"none","run","debug","full"}: raise SlError("usage: sl config verbosity none|run|debug|full")
+        cfg["verbosity"]=argv[1]
     elif action=="runtime-repo":
         if len(argv)!=2: raise SlError("usage: sl config runtime-repo URL")
         cfg["runtime_repo"]=argv[1]
@@ -57,13 +60,13 @@ def usage() -> str:
     return """sl — disposable GPU jobs on the vcp-configured pod
 
 Usage:
-  sl run [--detach] [--mem MEM] [--output-dir DIR] [--no-fetch] [--keep-remote] COMMAND <operands...> [-- <command args...>]
+  sl run [--detach] [--mem MEM] [--output-dir DIR] [--verbosity none|run|debug|full] [--no-fetch] [--keep-remote] COMMAND <operands...> [-- <command args...>]
   sl --command COMMAND <operands...> [-- <command args...>]
   sl jobs
   sl status JOB
   sl logs [-f] JOB
   sl tail [-n N] [--no-follow] JOB
-  sl fetch [--output-dir DIR] JOB
+  sl fetch [--output-dir DIR] [--verbosity none|run|debug|full] JOB
   sl clean JOB
   sl purge [--force] JOB
   sl commands
@@ -71,6 +74,10 @@ Usage:
   sl gpu
   sl doctor
   sl config [show|...]
+
+Verbosity defaults to 'run': show workload output and major sl markers, while hiding
+transport and setup noise. 'none' shows major sl markers only, 'debug' also shows
+prepare/setup output, and 'full' preserves the original show-everything behavior.
 
 Phase 1 is intentionally throwaway-first: stage inputs, execute durably, fetch outputs,
 retain lightweight logs/metadata, and clean heavy remote job data after success.
@@ -90,6 +97,7 @@ def parse_run(argv: Sequence[str], *, command_alias: str|None=None) -> argparse.
     parser.add_argument("--detach",action="store_true")
     parser.add_argument("--mem")
     parser.add_argument("--output-dir",default=".")
+    parser.add_argument("--verbosity",choices=["none","run","debug","full"])
     parser.add_argument("--no-fetch",action="store_true")
     parser.add_argument("--keep-remote",action="store_true")
     if command_alias is None: parser.add_argument("command")
@@ -130,15 +138,20 @@ def gpu() -> int:
 
 
 def fetch_command(argv: Sequence[str]) -> int:
-    parser=argparse.ArgumentParser(prog="sl fetch"); parser.add_argument("--output-dir"); parser.add_argument("job"); ns=parser.parse_args(argv)
-    cfg=sl_config(); jid=validate_job_id(ns.job)
-    fetch_outputs(jid,cfg,Path(ns.output_dir).expanduser() if ns.output_dir else None)
+    parser=argparse.ArgumentParser(prog="sl fetch")
+    parser.add_argument("--output-dir")
+    parser.add_argument("--verbosity",choices=["none","run","debug","full"])
+    parser.add_argument("job")
+    ns=parser.parse_args(argv)
+    cfg=sl_config(); jid=validate_job_id(ns.job); mode=verbosity(cfg,ns.verbosity)
+    fetched=fetch_outputs(jid,cfg,Path(ns.output_dir).expanduser() if ns.output_dir else None,verbosity_mode=mode)
     st=remote_status(jid,cfg,allow_missing=True)
     if st and st.get("state")=="SUCCEEDED": mark_complete(jid,cfg)
     sync_metadata(jid,cfg)
     current=remote_status(jid,cfg,allow_missing=True) or local_status(jid,cfg) or {}
     policy=cleanup_policy(cfg)
     if policy=="always" or (policy=="successful" and current.get("state")=="COMPLETE"): clean_remote_job(jid,cfg)
+    for path in fetched: print(f"[sl] output: {path}",file=sys.stderr)
     return 0
 
 
