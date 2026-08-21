@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import glob
 import os
 import shlex
 import time
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Dict, Iterable, List, Sequence
 
 from .common import DIRECTIVE_RE, SlError, command_dirs
+
+
+@dataclass(frozen=True)
+class InputPlan:
+    raw: str
+    stage_source: Path
+    remote_value: str
+    is_glob: bool
 
 
 class CommandSpec:
@@ -85,6 +95,38 @@ def shell_array(values: Iterable[str]) -> str:
     return " ".join(shlex.quote(v) for v in values)
 
 
+def plan_input(raw: str, remote_parent: str) -> InputPlan:
+    """Plan one local input for staging while preserving glob intent remotely.
+
+    A plain file/directory is staged directly. For a glob, only the stable
+    non-glob directory prefix is staged; the remaining pattern is appended to
+    its remote equivalent and is deliberately *not* expanded on the controller.
+    """
+    expanded = os.path.expandvars(os.path.expanduser(raw))
+    if not glob.has_magic(expanded):
+        source = Path(expanded).resolve()
+        if not (source.exists() or source.is_symlink()):
+            raise SlError(f"input not found: {raw}")
+        return InputPlan(raw=raw, stage_source=source,
+                         remote_value=f"{remote_parent}/{source.name}", is_glob=False)
+
+    parts = Path(expanded).parts
+    split = next((idx for idx, part in enumerate(parts) if glob.has_magic(part)), None)
+    if split is None:
+        raise SlError(f"could not resolve input glob: {raw}")
+    prefix = parts[:split]
+    source = Path(*prefix).resolve() if prefix else Path.cwd().resolve()
+    if source == Path(source.anchor):
+        raise SlError(f"input glob staging root is filesystem root; use a narrower path: {raw}")
+    if not source.is_dir():
+        raise SlError(f"input glob staging root not found: {source} (from {raw})")
+
+    suffix = parts[split:]
+    remote_base = PurePosixPath(remote_parent) / source.name
+    remote_value = str(PurePosixPath(remote_base, *suffix))
+    return InputPlan(raw=raw, stage_source=source, remote_value=remote_value, is_glob=True)
+
+
 def build_arg_values(spec: CommandSpec, operands: Sequence[str], remote_root: str, job_id: str) -> Dict[int, str]:
     required = max(spec.inputs + spec.outputs + [0])
     if len(operands) < required:
@@ -93,11 +135,7 @@ def build_arg_values(spec: CommandSpec, operands: Sequence[str], remote_root: st
     values: Dict[int, str] = {}
     for idx, raw in enumerate(operands, 1):
         if idx in spec.inputs:
-            local = Path(raw).expanduser()
-            if not (local.exists() or local.is_symlink()):
-                raise SlError(f"input argument {idx} not found: {raw}")
-            base = local.name or local.resolve().name
-            values[idx] = f"{job_dir}/input/arg{idx}/{base}"
+            values[idx] = plan_input(raw, f"{job_dir}/input/arg{idx}").remote_value
         elif idx in spec.outputs:
             values[idx] = f"{job_dir}/output/{validate_output_arg(raw)}"
         else:
@@ -107,6 +145,17 @@ def build_arg_values(spec: CommandSpec, operands: Sequence[str], remote_root: st
 
 def manifest_for_job(*, job_id: str, spec: CommandSpec, operands: Sequence[str], extra_args: Sequence[str],
                      output_dir: Path, remote_root: str, arg_values: Dict[int, str]) -> dict:
+    job_dir = f"{remote_root}/jobs/{job_id}"
+    inputs = []
+    for idx in spec.inputs:
+        plan = plan_input(operands[idx - 1], f"{job_dir}/input/arg{idx}")
+        inputs.append({
+            "arg": idx,
+            "local": plan.raw,
+            "staged_from": str(plan.stage_source),
+            "glob": plan.is_glob,
+            "remote": arg_values[idx],
+        })
     return {
         "schema": 1,
         "job_id": job_id,
@@ -115,16 +164,13 @@ def manifest_for_job(*, job_id: str, spec: CommandSpec, operands: Sequence[str],
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "operands": list(operands),
         "extra_args": list(extra_args),
-        "inputs": [
-            {"arg": idx, "local": str(Path(operands[idx - 1]).expanduser().resolve()), "remote": arg_values[idx]}
-            for idx in spec.inputs
-        ],
+        "inputs": inputs,
         "outputs": [
             {"arg": idx, "requested": validate_output_arg(operands[idx - 1]), "remote": arg_values[idx]}
             for idx in spec.outputs
         ],
         "local_output_dir": str(output_dir.expanduser().resolve()),
-        "remote_job_dir": f"{remote_root}/jobs/{job_id}",
+        "remote_job_dir": job_dir,
     }
 
 
@@ -223,15 +269,16 @@ fi
 
 mkdir -p "$(dirname "$SL_RUNTIME_DIR")" "$SL_CACHE_DIR" "$SL_COMMAND_CACHE" "$SL_WORK_DIR"
 if [[ -d "$SL_RUNTIME_DIR/.git" ]]; then
-  _sl_log "updating pod-runtime ($SL_RUNTIME_DIR)"
-  git -C "$SL_RUNTIME_DIR" fetch --quiet origin || true
+  _sl_log "refreshing pod-runtime snapshot ($SL_RUNTIME_DIR)"
 else
-  _sl_log "cloning pod-runtime"
+  _sl_log "shallow cloning pod-runtime"
   rm -rf "$SL_RUNTIME_DIR"
-  git clone --quiet {shlex.quote(runtime_repo)} "$SL_RUNTIME_DIR"
+  git clone --quiet --depth 1 --no-tags {shlex.quote(runtime_repo)} "$SL_RUNTIME_DIR"
 fi
-git -C "$SL_RUNTIME_DIR" checkout --quiet {shlex.quote(runtime_ref)}
-git -C "$SL_RUNTIME_DIR" reset --hard --quiet "origin/{runtime_ref}" 2>/dev/null || git -C "$SL_RUNTIME_DIR" reset --hard --quiet {shlex.quote(runtime_ref)}
+if ! git -C "$SL_RUNTIME_DIR" fetch --quiet --depth 1 --no-tags origin {shlex.quote(runtime_ref)}; then
+  _sl_log "ERROR: could not fetch pod-runtime ref {runtime_ref}"; _sl_status FAILED 127; exit 127
+fi
+git -C "$SL_RUNTIME_DIR" checkout --quiet --detach FETCH_HEAD
 if [[ ! -f "$SL_RUNTIME_DIR/helpers.sh" ]]; then _sl_log "ERROR: pod-runtime/helpers.sh unavailable"; _sl_status FAILED 127; exit 127; fi
 export repo_root="$SL_RUNTIME_DIR"
 set +u
