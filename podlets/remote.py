@@ -10,7 +10,7 @@ import sys
 from pathlib import Path, PurePosixPath
 from typing import Sequence
 
-from .common import ACTIVE_STATES, SlError, info, local_job_dir, read_json, remote_job_dir, ssh, vcp
+from .common import ACTIVE_STATES, SlError, info, local_job_dir, read_json, remote_job_dir, ssh, validate_output_dir, vcp
 from .spec import CommandSpec, plan_input
 
 
@@ -31,14 +31,18 @@ printf '%s' {shlex.quote(encoded_manifest)} | base64 -d > "$job/manifest.json"
 printf '%s' {shlex.quote(encoded_runner)} | base64 -d > "$job/run.sh"
 printf '%s' {shlex.quote(encoded_status)} | base64 -d > "$job/status.json"
 : > "$job/job.log"
+: > "$job/display.log"
 chmod 700 "$job/run.sh"
 ''')
 
 
-def stage_inputs(job_id: str, spec: CommandSpec, operands: Sequence[str], cfg: dict) -> None:
+def stage_inputs(
+    job_id: str, spec: CommandSpec, operands: Sequence[str], cfg: dict, *, verbosity_mode: str | None = None
+) -> None:
     job_dir = remote_job_dir(job_id, cfg)
     if not spec.inputs:
         return
+    transport_log = local_job_dir(job_id, cfg) / "transport.log"
     ssh(f"printf '%s\\n' '{{\"state\": \"STAGING\", \"exit_code\": null}}' > {shlex.quote(job_dir + '/status.json')}\n")
     for idx in spec.inputs:
         remote_parent = f"{job_dir}/input/arg{idx}"
@@ -49,7 +53,7 @@ def stage_inputs(job_id: str, spec: CommandSpec, operands: Sequence[str], cfg: d
             info(f"staging input arg{idx} root for glob {plan.raw!r}: {local}")
         else:
             info(f"staging input arg{idx}: {local}")
-        vcp([local, f"r:{remote_parent}/"], cfg)
+        vcp([local, f"r:{remote_parent}/"], cfg, verbosity_mode=verbosity_mode, log_path=transport_log)
 
 
 def launch_job(job_id: str, cfg: dict) -> int:
@@ -94,7 +98,7 @@ def local_status(job_id: str, cfg: dict) -> dict | None:
 
 def sync_metadata(job_id: str, cfg: dict) -> None:
     job_dir = remote_job_dir(job_id, cfg)
-    names = ["manifest.json", "status.json", "job.log", "command.cmd", "run.sh"]
+    names = ["manifest.json", "status.json", "job.log", "display.log", "command.cmd", "run.sh"]
     result = ssh(f'''python3 - {shlex.quote(job_dir)} <<'PY_META'
 import base64, json, pathlib, sys
 root=pathlib.Path(sys.argv[1]); names={names!r}; out={{}}
@@ -122,9 +126,9 @@ PY_META
                 pass
 
 
-def follow_remote_log(job_id: str, cfg: dict, *, lines: str, follow: bool) -> int:
+def follow_remote_log(job_id: str, cfg: dict, *, lines: str, follow: bool, display: bool = False) -> int:
     job_dir = remote_job_dir(job_id, cfg)
-    log = job_dir + "/job.log"
+    log = job_dir + ("/display.log" if display else "/job.log")
     if not follow:
         cmd = f"cat {shlex.quote(log)}\n" if lines == "+1" else f"tail -n {shlex.quote(lines)} {shlex.quote(log)}\n"
         return ssh(cmd, check=False).returncode
@@ -168,7 +172,9 @@ def load_manifest(job_id: str, cfg: dict) -> dict:
     return value
 
 
-def fetch_outputs(job_id: str, cfg: dict, output_dir: Path | None = None) -> None:
+def fetch_outputs(
+    job_id: str, cfg: dict, output_dir: Path | None = None, *, verbosity_mode: str | None = None
+) -> list[Path]:
     manifest = load_manifest(job_id, cfg)
     status = remote_status(job_id, cfg, allow_missing=True) or local_status(job_id, cfg)
     if status and status.get("state") in ACTIVE_STATES:
@@ -176,8 +182,9 @@ def fetch_outputs(job_id: str, cfg: dict, output_dir: Path | None = None) -> Non
     outputs = manifest.get("outputs", [])
     if not isinstance(outputs, list):
         raise SlError(f"invalid outputs in manifest for {job_id}")
-    dest_root = (output_dir or Path(str(manifest.get("local_output_dir") or "."))).expanduser().resolve()
-    dest_root.mkdir(parents=True, exist_ok=True)
+    dest_root = validate_output_dir(output_dir or Path(str(manifest.get("local_output_dir") or ".")))
+    transport_log = local_job_dir(job_id, cfg) / "transport.log"
+    fetched: list[Path] = []
     for item in outputs:
         if not isinstance(item, dict):
             continue
@@ -189,8 +196,10 @@ def fetch_outputs(job_id: str, cfg: dict, output_dir: Path | None = None) -> Non
         if ssh(f"test -e {shlex.quote(remote)} -o -L {shlex.quote(remote)}\n", check=False).returncode != 0:
             raise SlError(f"expected output missing on remote: {remote}")
         info(f"fetching output: {requested}")
-        vcp([f"r:{remote}", str(local_parent) + "/"], cfg)
+        vcp([f"r:{remote}", str(local_parent) + "/"], cfg, verbosity_mode=verbosity_mode, log_path=transport_log)
+        fetched.append(dest_root.joinpath(*rel.parts))
     sync_metadata(job_id, cfg)
+    return fetched
 
 
 def mark_complete(job_id: str, cfg: dict) -> None:
