@@ -9,17 +9,17 @@ sl_prepare() {
   local cache="$SL_CACHE_DIR/seedvr2-tile"
   local repo="$cache/repo"
   local venv="$cache/venv"
-  local branch="${SEEDVR2_TILE_REF:-agent/standalone-tiled-cli}"
+  local branch="${SEEDVR2_TILE_REF:-main}"
   local py="${PYTHON:-python3}"
 
   mkdir -p "$cache"
   if [[ ! -d "$repo/.git" ]]; then
-    git clone https://github.com/markwelshboy/seedvr2-tile.git "$repo"
+    git clone --depth 1 --single-branch --branch "$branch" \
+      https://github.com/markwelshboy/seedvr2-tile.git "$repo"
   else
-    git -C "$repo" fetch origin "$branch"
+    git -C "$repo" fetch --depth 1 origin "$branch"
+    git -C "$repo" checkout --detach FETCH_HEAD
   fi
-  git -C "$repo" checkout "$branch"
-  git -C "$repo" reset --hard "origin/$branch"
 
   if [[ ! -x "$venv/bin/python" ]]; then "$py" -m venv "$venv"; fi
   source "$venv/bin/activate"
