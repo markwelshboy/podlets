@@ -5,15 +5,23 @@
 
 sl_run() {
   local source="$SL_ARG_1"
-  local dataset_key="$SL_ARG_2"
+  local dataset_key="${SL_ARG_2:-}"
   local root="$SL_CACHE_DIR/qwen-caption/datasets"
-  local dest="$root/$dataset_key"
-  local tmp="$root/.${dataset_key}.import-${SL_JOB_ID}"
+  local dest tmp
 
+  if [[ -z "$dataset_key" ]]; then
+    echo "ERROR: dataset key is required" >&2
+    echo "Usage: sl run qwen-caption-import <local-directory> <dataset-key>" >&2
+    return 2
+  fi
   if [[ ! "$dataset_key" =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo "ERROR: dataset key must contain only letters, numbers, dot, underscore, or dash: $dataset_key" >&2
     return 2
   fi
+
+  dest="$root/$dataset_key"
+  tmp="$root/.${dataset_key}.import-${SL_JOB_ID}"
+
   if [[ ! -d "$source" ]]; then
     echo "ERROR: qwen-caption-import expects a directory input: $source" >&2
     return 2
