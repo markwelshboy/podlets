@@ -199,6 +199,7 @@ export SL_COMMAND_NAME={shlex.quote(spec.name)}
 export SL_COMMAND_CACHE={shlex.quote(command_cache)}
 export SL_COMMAND_FILE="$SL_JOB_DIR/command.cmd"
 export SL_LOG_FILE="$SL_JOB_DIR/job.log"
+export SL_STATUS_FILE="$SL_JOB_DIR/status.json"
 export SL_DISPLAY_LOG="$SL_JOB_DIR/display.log"
 export SL_VERBOSITY={shlex.quote(verbosity_mode)}
 {os.linesep.join(arg_lines)}
