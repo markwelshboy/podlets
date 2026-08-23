@@ -90,6 +90,8 @@ class Phase1Tests(unittest.TestCase):
         self.assertIn("git clone --quiet --depth 1 --no-tags",script)
         self.assertIn("fetch --quiet --depth 1 --no-tags origin main",script)
         self.assertIn("export SL_VERBOSITY=debug",script)
+        self.assertIn('export SL_STATUS_FILE="$SL_JOB_DIR/status.json"',script)
+        self.assertLess(script.index('export SL_STATUS_FILE="$SL_JOB_DIR/status.json"'),script.index("_sl_status PREPARING"))
         self.assertIn("_sl_phase PREPARE sl_prepare",script)
         self.assertIn("_sl_phase SETUP sl_setup",script)
         self.assertIn("_sl_phase RUN sl_run",script)
