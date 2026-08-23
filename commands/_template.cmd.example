@@ -1,0 +1,12 @@
+# sl:name example
+# sl:description Example disposable Podlets command
+# sl:input 1
+# sl:output 2
+# sl:setup-version 1
+# sl:memcheck
+
+sl_prepare() { :; }
+sl_setup() { :; }
+sl_run() {
+  your-command "$SL_ARG_1" "$SL_ARG_2" "${SL_EXTRA_ARGS[@]}"
+}
