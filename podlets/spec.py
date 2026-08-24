@@ -293,37 +293,57 @@ _sl_wait_for_memory() {{
 }}
 
 _sl_gpu_monitor_start() {{
+  local total baseline
   SL_GPU_MONITOR_PID=""
   SL_GPU_TOTAL_MIB=""
   SL_GPU_BASELINE_USED_MIB=""
   [[ "$SL_GPU_TELEMETRY_ENABLED" == "1" ]] || return 0
-  command -v nvidia-smi >/dev/null 2>&1 || return 0
-
-  SL_GPU_TOTAL_MIB="$(nvidia-smi -i 0 --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
-  SL_GPU_BASELINE_USED_MIB="$(nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
-  if [[ ! "$SL_GPU_TOTAL_MIB" =~ ^[0-9]+$ || ! "$SL_GPU_BASELINE_USED_MIB" =~ ^[0-9]+$ ]]; then
-    SL_GPU_TOTAL_MIB=""; SL_GPU_BASELINE_USED_MIB=""; return 0
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    _sl_emit major "GPU telemetry unavailable: nvidia-smi not found"
+    return 0
   fi
+
+  total="$(nvidia-smi -i 0 --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
+  baseline="$(nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
+  if [[ ! "$total" =~ ^[0-9]+$ ]]; then
+    _sl_emit major "GPU telemetry unavailable: could not query GPU 0 total VRAM"
+    return 0
+  fi
+  if [[ ! "$baseline" =~ ^[0-9]+$ ]]; then
+    _sl_emit major "GPU telemetry unavailable: could not query GPU 0 used VRAM"
+    return 0
+  fi
+  SL_GPU_TOTAL_MIB="$total"
+  SL_GPU_BASELINE_USED_MIB="$baseline"
 
   rm -f "$SL_GPU_TELEMETRY_FILE" "$SL_GPU_SAMPLES_FILE"
   : > "$SL_GPU_SAMPLES_FILE"
-  nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits --loop-ms=500 \
-    > "$SL_GPU_SAMPLES_FILE" 2>/dev/null &
+  (
+    while :; do
+      nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null \
+        | head -n1 | tr -d '[:space:]' >> "$SL_GPU_SAMPLES_FILE" || true
+      sleep 0.5
+    done
+  ) &
   SL_GPU_MONITOR_PID=$!
+  _sl_emit debug "GPU telemetry started: GPU 0 baseline ${{SL_GPU_BASELINE_USED_MIB}} MiB / ${{SL_GPU_TOTAL_MIB}} MiB total"
 }}
 
 _sl_gpu_monitor_stop_and_report() {{
   local run_start_ms="$1" run_end_ms="$2" required="${{SL_MEMORY_REQUIRED_MIB:-}}" final_used=""
+  [[ "$SL_GPU_TELEMETRY_ENABLED" == "1" ]] || return 0
   if [[ -n "${{SL_GPU_MONITOR_PID:-}}" ]]; then
     kill "$SL_GPU_MONITOR_PID" 2>/dev/null || true
     wait "$SL_GPU_MONITOR_PID" 2>/dev/null || true
   fi
-  [[ -n "${{SL_GPU_TOTAL_MIB:-}}" && -n "${{SL_GPU_BASELINE_USED_MIB:-}}" ]] || return 0
+  if [[ -z "${{SL_GPU_TOTAL_MIB:-}}" || -z "${{SL_GPU_BASELINE_USED_MIB:-}}" ]]; then
+    return 0
+  fi
 
   final_used="$(nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
   if [[ "$final_used" =~ ^[0-9]+$ ]]; then printf '%s\\n' "$final_used" >> "$SL_GPU_SAMPLES_FILE"; fi
 
-  python3 - "$SL_GPU_TOTAL_MIB" "$SL_GPU_BASELINE_USED_MIB" "$SL_GPU_SAMPLES_FILE" \
+  if ! python3 - "$SL_GPU_TOTAL_MIB" "$SL_GPU_BASELINE_USED_MIB" "$SL_GPU_SAMPLES_FILE" \
     "$SL_GPU_TELEMETRY_FILE" "$run_start_ms" "$run_end_ms" "$required" <<'PY_GPU'
 import json
 import math
@@ -366,6 +386,15 @@ payload = {{
 }}
 out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 PY_GPU
+  then
+    _sl_emit major "GPU telemetry unavailable: failed to summarize samples"
+    return 0
+  fi
+
+  if [[ ! -s "$SL_GPU_TELEMETRY_FILE" ]]; then
+    _sl_emit major "GPU telemetry unavailable: summary file was not created"
+    return 0
+  fi
 
   while IFS= read -r line; do
     _sl_emit major "$line"
