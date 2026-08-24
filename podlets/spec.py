@@ -384,7 +384,7 @@ payload = {{
     "suggested_memcheck": suggested,
     "requested_memcheck_mib": required,
 }}
-out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+out_path.write_text(json.dumps(payload, indent=2) + "\\n", encoding="utf-8")
 PY_GPU
   then
     _sl_emit major "GPU telemetry unavailable: failed to summarize samples"
