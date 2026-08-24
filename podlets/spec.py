@@ -349,9 +349,9 @@ delta = max(0, peak - baseline)
 run_seconds = max(0.0, (end_ms - start_ms) / 1000.0)
 headroom = max(1024, math.ceil(delta * 0.10))
 suggested_mib = max(1024, math.ceil((delta + headroom) / 1024) * 1024)
-suggested = f"{suggested_mib // 1024}G"
+suggested = "%dG" % (suggested_mib // 1024)
 
-payload = {
+payload = {{
     "gpu_index": 0,
     "sample_interval_ms": 500,
     "sample_count": len(samples),
@@ -363,7 +363,7 @@ payload = {
     "suggested_memcheck_mib": suggested_mib,
     "suggested_memcheck": suggested,
     "requested_memcheck_mib": required,
-}
+}}
 out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 PY_GPU
 
@@ -372,16 +372,16 @@ PY_GPU
   done < <(python3 - "$SL_GPU_TELEMETRY_FILE" <<'PY_REPORT'
 import json, sys
 p=json.load(open(sys.argv[1], encoding='utf-8'))
-def gib(v): return f"{v / 1024:.1f} GiB"
+def gib(v): return "%.1f GiB" % (v / 1024)
 print("============================================================")
 print("GPU RUN TELEMETRY (GPU 0; 500 ms sampling)")
-print(f"  BASELINE GPU VRAM:       {gib(p['baseline_used_mib'])}")
-print(f"  MAX GPU VRAM OBSERVED:   {gib(p['peak_used_mib'])} / {gib(p['total_mib'])}")
-print(f"  PEAK ABOVE BASELINE:     {gib(p['peak_above_baseline_mib'])}")
-print(f"  RUN TIME:                {p['run_seconds']:.1f}s")
-print(f"  SUGGESTED --mem:         {p['suggested_memcheck']} (10% headroom; minimum +1 GiB)")
+print("  BASELINE GPU VRAM:       %s" % gib(p['baseline_used_mib']))
+print("  MAX GPU VRAM OBSERVED:   %s / %s" % (gib(p['peak_used_mib']), gib(p['total_mib'])))
+print("  PEAK ABOVE BASELINE:     %s" % gib(p['peak_above_baseline_mib']))
+print("  RUN TIME:                %.1fs" % p['run_seconds'])
+print("  SUGGESTED --mem:         %s (10%% headroom; minimum +1 GiB)" % p['suggested_memcheck'])
 if p.get('requested_memcheck_mib') is not None:
-    print(f"  CONFIGURED --mem:        {gib(p['requested_memcheck_mib'])}")
+    print("  CONFIGURED --mem:        %s" % gib(p['requested_memcheck_mib']))
 print("============================================================")
 PY_REPORT
   )
