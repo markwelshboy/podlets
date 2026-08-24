@@ -183,6 +183,7 @@ def build_run_script(*, job_id: str, spec: CommandSpec, arg_values: Dict[int, st
     command_cache = f"{cache_dir}/commands/{spec.name}"
     arg_lines = [f"export SL_ARG_{idx}={shlex.quote(value)}" for idx, value in sorted(arg_values.items())]
     memory_line = f"export SL_MEMORY_REQUIRED_MIB={memory_mib}" if memory_mib is not None else "unset SL_MEMORY_REQUIRED_MIB"
+    telemetry_line = f"export SL_GPU_TELEMETRY_ENABLED={'1' if spec.memcheck else '0'}"
     extras = shell_array(extra_args)
     return f'''#!/usr/bin/env bash
 set -uo pipefail
@@ -198,16 +199,21 @@ export SL_RUNTIME_DIR={shlex.quote(runtime_dir)}
 export SL_COMMAND_NAME={shlex.quote(spec.name)}
 export SL_COMMAND_CACHE={shlex.quote(command_cache)}
 export SL_COMMAND_FILE="$SL_JOB_DIR/command.cmd"
+export SL_STATUS_FILE="$SL_JOB_DIR/status.json"
 export SL_LOG_FILE="$SL_JOB_DIR/job.log"
 export SL_DISPLAY_LOG="$SL_JOB_DIR/display.log"
+export SL_GPU_TELEMETRY_FILE="$SL_JOB_DIR/gpu-telemetry.json"
+export SL_GPU_SAMPLES_FILE="$SL_JOB_DIR/gpu-memory.samples"
 export SL_VERBOSITY={shlex.quote(verbosity_mode)}
 {os.linesep.join(arg_lines)}
 SL_EXTRA_ARGS=({extras})
 {memory_line}
+{telemetry_line}
 export POD_RUNTIME_DIR="$SL_RUNTIME_DIR"
 export PYTHONUNBUFFERED=1
 
 _sl_now() {{ date -Is; }}
+_sl_epoch_ms() {{ date +%s%3N; }}
 _sl_emit() {{
   local level="$1"; shift
   local line="$(_sl_now) [sl] $*"
@@ -234,11 +240,19 @@ _sl_status() {{
   completed=""
   if [[ "$state" == "SUCCEEDED" || "$state" == "FAILED" || "$state" == "COMPLETE" ]]; then completed="$(_sl_now)"; fi
   SL_STATE="$state" SL_CODE="$code" SL_STARTED="$started" SL_COMPLETED="$completed" \\
-    python3 - "$SL_STATUS_FILE" <<'PY_STATUS'
+    python3 - "$SL_STATUS_FILE" "$SL_GPU_TELEMETRY_FILE" <<'PY_STATUS'
 import json, os, pathlib, sys
 p = pathlib.Path(sys.argv[1])
+telemetry_path = pathlib.Path(sys.argv[2])
 required = os.environ.get("SL_MEMORY_REQUIRED_MIB")
 free = os.environ.get("SL_MEMORY_FREE_MIB")
+telemetry = None
+if telemetry_path.is_file():
+    try:
+        value = json.loads(telemetry_path.read_text(encoding="utf-8"))
+        telemetry = value if isinstance(value, dict) else None
+    except Exception:
+        telemetry = None
 data = {{
   "state": os.environ["SL_STATE"],
   "exit_code": int(os.environ["SL_CODE"]) if os.environ.get("SL_CODE") not in (None, "") else None,
@@ -246,6 +260,7 @@ data = {{
   "completed_at": os.environ.get("SL_COMPLETED") or None,
   "memory_required_mib": int(required) if required else None,
   "memory_free_mib": int(free) if free else None,
+  "gpu_telemetry": telemetry,
 }}
 tmp = p.with_suffix(".tmp")
 tmp.write_text(json.dumps(data, indent=2) + "\\n")
@@ -259,12 +274,12 @@ _sl_wait_for_memory() {{
   if ! command -v nvidia-smi >/dev/null 2>&1; then
     _sl_emit major "ERROR: --mem requested but nvidia-smi is unavailable"; _sl_status FAILED 127; return 127
   fi
-  total="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
+  total="$(nvidia-smi -i 0 --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
   if [[ ! "$total" =~ ^[0-9]+$ ]]; then _sl_emit major "ERROR: could not query GPU memory total"; _sl_status FAILED 2; return 2; fi
   if (( required > total )); then _sl_emit major "ERROR: memory requirement ${{required}} MiB exceeds GPU total ${{total}} MiB"; _sl_status FAILED 2; return 2; fi
   _sl_emit major "memory gate enabled: require ${{required}} MiB free GPU VRAM (GPU total ${{total}} MiB)"
   while :; do
-    free="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
+    free="$(nvidia-smi -i 0 --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
     if [[ ! "$free" =~ ^[0-9]+$ ]]; then _sl_emit major "ERROR: could not query free GPU memory"; _sl_status FAILED 2; return 2; fi
     export SL_MEMORY_FREE_MIB="$free"
     _sl_status WAITING_FOR_MEMORY
@@ -275,6 +290,115 @@ _sl_wait_for_memory() {{
     fi
     sleep 5
   done
+}}
+
+_sl_gpu_monitor_start() {{
+  SL_GPU_MONITOR_PID=""
+  SL_GPU_TOTAL_MIB=""
+  SL_GPU_BASELINE_USED_MIB=""
+  [[ "$SL_GPU_TELEMETRY_ENABLED" == "1" ]] || return 0
+  command -v nvidia-smi >/dev/null 2>&1 || return 0
+
+  SL_GPU_TOTAL_MIB="$(nvidia-smi -i 0 --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
+  SL_GPU_BASELINE_USED_MIB="$(nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
+  if [[ ! "$SL_GPU_TOTAL_MIB" =~ ^[0-9]+$ || ! "$SL_GPU_BASELINE_USED_MIB" =~ ^[0-9]+$ ]]; then
+    SL_GPU_TOTAL_MIB=""; SL_GPU_BASELINE_USED_MIB=""; return 0
+  fi
+
+  rm -f "$SL_GPU_TELEMETRY_FILE" "$SL_GPU_SAMPLES_FILE"
+  : > "$SL_GPU_SAMPLES_FILE"
+  nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits --loop-ms=500 \
+    > "$SL_GPU_SAMPLES_FILE" 2>/dev/null &
+  SL_GPU_MONITOR_PID=$!
+}}
+
+_sl_gpu_monitor_stop_and_report() {{
+  local run_start_ms="$1" run_end_ms="$2" required="${{SL_MEMORY_REQUIRED_MIB:-}}" final_used=""
+  if [[ -n "${{SL_GPU_MONITOR_PID:-}}" ]]; then
+    kill "$SL_GPU_MONITOR_PID" 2>/dev/null || true
+    wait "$SL_GPU_MONITOR_PID" 2>/dev/null || true
+  fi
+  [[ -n "${{SL_GPU_TOTAL_MIB:-}}" && -n "${{SL_GPU_BASELINE_USED_MIB:-}}" ]] || return 0
+
+  final_used="$(nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
+  if [[ "$final_used" =~ ^[0-9]+$ ]]; then printf '%s\\n' "$final_used" >> "$SL_GPU_SAMPLES_FILE"; fi
+
+  python3 - "$SL_GPU_TOTAL_MIB" "$SL_GPU_BASELINE_USED_MIB" "$SL_GPU_SAMPLES_FILE" \
+    "$SL_GPU_TELEMETRY_FILE" "$run_start_ms" "$run_end_ms" "$required" <<'PY_GPU'
+import json
+import math
+import pathlib
+import sys
+
+total = int(sys.argv[1])
+baseline = int(sys.argv[2])
+samples_path = pathlib.Path(sys.argv[3])
+out_path = pathlib.Path(sys.argv[4])
+start_ms = int(sys.argv[5])
+end_ms = int(sys.argv[6])
+required = int(sys.argv[7]) if sys.argv[7] else None
+
+samples = []
+if samples_path.is_file():
+    for raw in samples_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        raw = raw.strip()
+        if raw.isdigit():
+            samples.append(int(raw))
+peak = max([baseline, *samples])
+delta = max(0, peak - baseline)
+run_seconds = max(0.0, (end_ms - start_ms) / 1000.0)
+headroom = max(1024, math.ceil(delta * 0.10))
+suggested_mib = max(1024, math.ceil((delta + headroom) / 1024) * 1024)
+suggested = f"{suggested_mib // 1024}G"
+
+payload = {
+    "gpu_index": 0,
+    "sample_interval_ms": 500,
+    "sample_count": len(samples),
+    "total_mib": total,
+    "baseline_used_mib": baseline,
+    "peak_used_mib": peak,
+    "peak_above_baseline_mib": delta,
+    "run_seconds": round(run_seconds, 3),
+    "suggested_memcheck_mib": suggested_mib,
+    "suggested_memcheck": suggested,
+    "requested_memcheck_mib": required,
+}
+out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+def gib(value: int) -> str:
+    return f"{value / 1024:.1f} GiB"
+
+print("============================================================")
+print("GPU RUN TELEMETRY (GPU 0; 500 ms sampling)")
+print(f"  BASELINE GPU VRAM:       {gib(baseline)}")
+print(f"  MAX GPU VRAM OBSERVED:   {gib(peak)} / {gib(total)}")
+print(f"  PEAK ABOVE BASELINE:     {gib(delta)}")
+print(f"  RUN TIME:                {run_seconds:.1f}s")
+print(f"  SUGGESTED --mem:         {suggested} (10% headroom; minimum +1 GiB)")
+if required is not None:
+    print(f"  CONFIGURED --mem:        {gib(required)}")
+print("============================================================")
+PY_GPU
+
+  while IFS= read -r line; do
+    _sl_emit major "$line"
+  done < <(python3 - "$SL_GPU_TELEMETRY_FILE" <<'PY_REPORT'
+import json, sys
+p=json.load(open(sys.argv[1], encoding='utf-8'))
+def gib(v): return f"{v / 1024:.1f} GiB"
+print("============================================================")
+print("GPU RUN TELEMETRY (GPU 0; 500 ms sampling)")
+print(f"  BASELINE GPU VRAM:       {gib(p['baseline_used_mib'])}")
+print(f"  MAX GPU VRAM OBSERVED:   {gib(p['peak_used_mib'])} / {gib(p['total_mib'])}")
+print(f"  PEAK ABOVE BASELINE:     {gib(p['peak_above_baseline_mib'])}")
+print(f"  RUN TIME:                {p['run_seconds']:.1f}s")
+print(f"  SUGGESTED --mem:         {p['suggested_memcheck']} (10% headroom; minimum +1 GiB)")
+if p.get('requested_memcheck_mib') is not None:
+    print(f"  CONFIGURED --mem:        {gib(p['requested_memcheck_mib'])}")
+print("============================================================")
+PY_REPORT
+  )
 }}
 
 _sl_status PREPARING
@@ -331,7 +455,11 @@ fi
 _sl_wait_for_memory; rc=$?; [[ $rc -eq 0 ]] || exit "$rc"
 _sl_status RUNNING
 _sl_emit major "running command"
+_sl_gpu_monitor_start
+run_start_ms="$(_sl_epoch_ms)"
 _sl_phase RUN sl_run; rc=$?
+run_end_ms="$(_sl_epoch_ms)"
+_sl_gpu_monitor_stop_and_report "$run_start_ms" "$run_end_ms"
 if [[ $rc -eq 0 ]]; then _sl_emit major "command completed successfully"; _sl_status SUCCEEDED 0
 else _sl_emit major "command failed with exit $rc"; _sl_status FAILED "$rc"; fi
 exit "$rc"
