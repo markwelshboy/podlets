@@ -91,10 +91,21 @@ class Phase1Tests(unittest.TestCase):
         self.assertIn("fetch --quiet --depth 1 --no-tags origin main",script)
         self.assertIn("export SL_VERBOSITY=debug",script)
         self.assertIn('export SL_STATUS_FILE="$SL_JOB_DIR/status.json"',script)
-        self.assertLess(script.index('export SL_STATUS_FILE="$SL_JOB_DIR/status.json"'),script.index("_sl_status PREPARING"))
+        self.assertIn("export SL_GPU_TELEMETRY_ENABLED=1",script)
+        self.assertIn("--loop-ms=500",script)
+        self.assertIn("_sl_gpu_monitor_start",script)
+        self.assertIn("_sl_gpu_monitor_stop_and_report",script)
+        self.assertIn("SUGGESTED --mem",script)
+        self.assertIn('"gpu_telemetry": telemetry',script)
         self.assertIn("_sl_phase PREPARE sl_prepare",script)
         self.assertIn("_sl_phase SETUP sl_setup",script)
         self.assertIn("_sl_phase RUN sl_run",script)
+
+    def test_non_memcheck_command_disables_gpu_telemetry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cmd=Path(tmp)/"demo.cmd"; cmd.write_text("# sl:name demo\nsl_run() { :; }\n")
+            script=spec.build_run_script(job_id="20260821_120000_deadbeef",spec=spec.parse_command(cmd),arg_values={},extra_args=[],remote_root="/workspace/.sl",runtime_repo="https://example.invalid/pod-runtime.git",runtime_ref="main")
+        self.assertIn("export SL_GPU_TELEMETRY_ENABLED=0",script)
 
     def test_generated_runner_is_valid_bash(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,8 +141,12 @@ class Phase1Tests(unittest.TestCase):
 
     def test_builtin_commands_parse(self):
         cfg={"command_dir":str(Path(__file__).resolve().parents[1]/"commands")}
-        smoke=spec.find_command("smoke",cfg); seed=spec.find_command("seedvr2",cfg)
-        self.assertTrue(smoke.memcheck); self.assertTrue(seed.memcheck); self.assertEqual(seed.inputs,[1]); self.assertEqual(seed.outputs,[2])
+        smoke=spec.find_command("smoke",cfg)
+        seed=spec.find_command("seedvr2",cfg)
+        sweep=spec.find_command("seedvr2-sweep",cfg)
+        self.assertTrue(smoke.memcheck)
+        self.assertTrue(seed.memcheck); self.assertEqual(seed.inputs,[1]); self.assertEqual(seed.outputs,[2])
+        self.assertTrue(sweep.memcheck); self.assertEqual(sweep.inputs,[1]); self.assertEqual(sweep.outputs,[2])
 
 
 if __name__ == "__main__": unittest.main()

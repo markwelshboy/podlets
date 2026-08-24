@@ -123,6 +123,22 @@ def status(jid: str, cfg: dict) -> int:
     required = st.get("memory_required_mib") if isinstance(st.get("memory_required_mib"), int) else memory.get("required_mib")
     free = st.get("memory_free_mib") if isinstance(st.get("memory_free_mib"), int) else None
     if isinstance(required, int): print(f"memory:    {format_memory_mib(free) if free is not None else 'unknown'} free / {format_memory_mib(required)} required")
+    telemetry = st.get("gpu_telemetry") if isinstance(st.get("gpu_telemetry"), dict) else None
+    if telemetry:
+        total = telemetry.get("total_mib")
+        baseline = telemetry.get("baseline_used_mib")
+        peak = telemetry.get("peak_used_mib")
+        delta = telemetry.get("peak_above_baseline_mib")
+        seconds = telemetry.get("run_seconds")
+        suggested = telemetry.get("suggested_memcheck")
+        if isinstance(peak, int) and isinstance(total, int):
+            print(f"gpu peak:   {format_memory_mib(peak)} / {format_memory_mib(total)} total")
+        if isinstance(delta, int) and isinstance(baseline, int):
+            print(f"gpu delta:  {format_memory_mib(delta)} above {format_memory_mib(baseline)} baseline")
+        if isinstance(seconds, (int, float)):
+            print(f"run time:   {float(seconds):.1f}s")
+        if isinstance(suggested, str) and suggested:
+            print(f"mem hint:   --mem {suggested}")
     return 0
 
 
