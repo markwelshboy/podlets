@@ -92,7 +92,9 @@ class Phase1Tests(unittest.TestCase):
         self.assertIn("export SL_VERBOSITY=debug",script)
         self.assertIn('export SL_STATUS_FILE="$SL_JOB_DIR/status.json"',script)
         self.assertIn("export SL_GPU_TELEMETRY_ENABLED=1",script)
-        self.assertIn("--loop-ms=500",script)
+        self.assertIn("sleep 0.5",script)
+        self.assertNotIn("--loop-ms=500",script)
+        self.assertIn("GPU telemetry unavailable:",script)
         self.assertIn("_sl_gpu_monitor_start",script)
         self.assertIn("_sl_gpu_monitor_stop_and_report",script)
         self.assertIn("SUGGESTED --mem",script)
@@ -114,6 +116,11 @@ class Phase1Tests(unittest.TestCase):
             runner=root/"run.sh"; runner.write_text(script)
             result=subprocess.run(["bash","-n",str(runner)],capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
+        for marker in ("PY_STATUS", "PY_GPU", "PY_REPORT"):
+            opener = f"<<'{marker}'\n"
+            start = script.index(opener) + len(opener)
+            end = script.index(f"\n{marker}", start)
+            compile(script[start:end], f"generated-{marker}.py", "exec")
 
     def test_run_parser_preserves_extra_argv(self):
         ns=cli.parse_run(["--mem","18G","--verbosity","debug","seedvr2","in","out","--","--config","a b.json","--seed","43"])
