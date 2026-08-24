@@ -211,6 +211,12 @@ SL_EXTRA_ARGS=({extras})
 {telemetry_line}
 export POD_RUNTIME_DIR="$SL_RUNTIME_DIR"
 export PYTHONUNBUFFERED=1
+SL_CONTROL_PYTHON="$(command -v python3 || true)"
+if [[ -z "$SL_CONTROL_PYTHON" ]]; then
+  echo "ERROR: python3 unavailable for Podlets runner metadata" >&2
+  exit 127
+fi
+export SL_CONTROL_PYTHON
 
 _sl_now() {{ date -Is; }}
 _sl_epoch_ms() {{ date +%s%3N; }}
@@ -240,7 +246,7 @@ _sl_status() {{
   completed=""
   if [[ "$state" == "SUCCEEDED" || "$state" == "FAILED" || "$state" == "COMPLETE" ]]; then completed="$(_sl_now)"; fi
   SL_STATE="$state" SL_CODE="$code" SL_STARTED="$started" SL_COMPLETED="$completed" \\
-    python3 - "$SL_STATUS_FILE" "$SL_GPU_TELEMETRY_FILE" <<'PY_STATUS'
+    "$SL_CONTROL_PYTHON" - "$SL_STATUS_FILE" "$SL_GPU_TELEMETRY_FILE" <<'PY_STATUS'
 import json, os, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 telemetry_path = pathlib.Path(sys.argv[2])
@@ -293,7 +299,7 @@ _sl_wait_for_memory() {{
 }}
 
 _sl_gpu_monitor_start() {{
-  local total baseline
+  local total baseline sample
   SL_GPU_MONITOR_PID=""
   SL_GPU_TOTAL_MIB=""
   SL_GPU_BASELINE_USED_MIB=""
@@ -320,8 +326,11 @@ _sl_gpu_monitor_start() {{
   : > "$SL_GPU_SAMPLES_FILE"
   (
     while :; do
-      nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null \
-        | head -n1 | tr -d '[:space:]' >> "$SL_GPU_SAMPLES_FILE" || true
+      sample="$(nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null \
+        | head -n1 | tr -d '[:space:]')"
+      if [[ "$sample" =~ ^[0-9]+$ ]]; then
+        printf '%s\\n' "$sample" >> "$SL_GPU_SAMPLES_FILE"
+      fi
       sleep 0.5
     done
   ) &
@@ -343,7 +352,7 @@ _sl_gpu_monitor_stop_and_report() {{
   final_used="$(nvidia-smi -i 0 --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]')"
   if [[ "$final_used" =~ ^[0-9]+$ ]]; then printf '%s\\n' "$final_used" >> "$SL_GPU_SAMPLES_FILE"; fi
 
-  if ! python3 - "$SL_GPU_TOTAL_MIB" "$SL_GPU_BASELINE_USED_MIB" "$SL_GPU_SAMPLES_FILE" \
+  if ! "$SL_CONTROL_PYTHON" - "$SL_GPU_TOTAL_MIB" "$SL_GPU_BASELINE_USED_MIB" "$SL_GPU_SAMPLES_FILE" \
     "$SL_GPU_TELEMETRY_FILE" "$run_start_ms" "$run_end_ms" "$required" <<'PY_GPU'
 import json
 import math
@@ -398,7 +407,7 @@ PY_GPU
 
   while IFS= read -r line; do
     _sl_emit major "$line"
-  done < <(python3 - "$SL_GPU_TELEMETRY_FILE" <<'PY_REPORT'
+  done < <("$SL_CONTROL_PYTHON" - "$SL_GPU_TELEMETRY_FILE" <<'PY_REPORT'
 import json, sys
 p=json.load(open(sys.argv[1], encoding='utf-8'))
 def gib(v): return "%.1f GiB" % (v / 1024)
