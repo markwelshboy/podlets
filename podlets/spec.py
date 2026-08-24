@@ -365,20 +365,6 @@ payload = {
     "requested_memcheck_mib": required,
 }
 out_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-
-def gib(value: int) -> str:
-    return f"{value / 1024:.1f} GiB"
-
-print("============================================================")
-print("GPU RUN TELEMETRY (GPU 0; 500 ms sampling)")
-print(f"  BASELINE GPU VRAM:       {gib(baseline)}")
-print(f"  MAX GPU VRAM OBSERVED:   {gib(peak)} / {gib(total)}")
-print(f"  PEAK ABOVE BASELINE:     {gib(delta)}")
-print(f"  RUN TIME:                {run_seconds:.1f}s")
-print(f"  SUGGESTED --mem:         {suggested} (10% headroom; minimum +1 GiB)")
-if required is not None:
-    print(f"  CONFIGURED --mem:        {gib(required)}")
-print("============================================================")
 PY_GPU
 
   while IFS= read -r line; do
