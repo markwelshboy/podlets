@@ -141,6 +141,22 @@ class Phase1Tests(unittest.TestCase):
         ns=cli.parse_run(["in","out","--","--scale","2"],command_alias="seedvr2.cmd")
         self.assertEqual(ns.command,"seedvr2.cmd"); self.assertEqual(ns.extra,["--scale","2"])
 
+    def test_cancel_command_terminates_process_group_and_retains_workspace(self):
+        jid="20260824_180000_deadbeef"
+        result=type("Result",(),{"returncode":0,"stdout":"","stderr":""})()
+        with mock.patch.object(cli,"sl_config",return_value={}), \
+             mock.patch.object(cli,"remote_status",return_value={"state":"RUNNING"}), \
+             mock.patch.object(cli,"ssh",return_value=result) as ssh_mock, \
+             mock.patch.object(cli,"sync_metadata") as sync_mock:
+            self.assertEqual(cli.cancel_command([jid]),0)
+        script=ssh_mock.call_args.args[0]
+        self.assertIn('kill -TERM -- "-$pid"',script)
+        self.assertIn('kill -KILL -- "-$pid"',script)
+        self.assertIn('data["state"]="CANCELLED"',script)
+        self.assertIn('job cancelled by controller',script)
+        self.assertNotIn("rm -rf",script)
+        sync_mock.assert_called_once_with(jid,{})
+
     def test_vcp_ssh_config_is_reused(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/"vcp.json"; path.write_text('{"ssh":["-p","1234","root@host"]}')
