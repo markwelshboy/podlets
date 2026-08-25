@@ -173,7 +173,7 @@ python3 - "$job/status.json" "$now" <<'PY_CANCEL'
 import json, pathlib, sys
 p=pathlib.Path(sys.argv[1]); now=sys.argv[2]
 try: data=json.loads(p.read_text(encoding="utf-8"))
-except Exception: data={}
+except Exception: data={{}}
 data["state"]="CANCELLED"
 data["exit_code"]=None
 data["completed_at"]=now
@@ -243,5 +243,5 @@ def entrypoint() -> int:
     except KeyboardInterrupt: return _error("interrupted",130)
 
 
-def _error(message: str,code:int) -> int:
+def _error(message: str,code: int) -> int:
     print(f"[sl] ERROR: {message}",file=sys.stderr); return code
