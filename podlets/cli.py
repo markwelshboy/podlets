@@ -7,7 +7,8 @@ import sys
 from pathlib import Path
 from typing import List, Sequence
 
-from .common import ACTIVE_STATES, SL_CONFIG_PATH, VCP_CONFIG_PATH, SlError, cleanup_policy, command_dirs, info, remote_job_dir, remote_root, runtime_ref, runtime_repo, sl_config, ssh, ssh_argv, state_dir, validate_job_id, vcp_path, verbosity, write_sl_config
+from .bootstrap import ensure_worker_runtime, probe_worker_runtime
+from .common import ACTIVE_STATES, SL_CONFIG_PATH, VCP_CONFIG_PATH, SlError, cleanup_policy, command_dirs, info, read_json, remote_job_dir, remote_root, runtime_ref, runtime_repo, sl_config, ssh, ssh_argv, state_dir, validate_job_id, vcp_path, verbosity, write_json, write_sl_config
 from .jobs import command_show, commands, jobs, logs, run_job, status, tail
 from .memory import format_memory_mib, remote_gpu_memory
 from .remote import clean_remote_job, fetch_outputs, local_status, mark_complete, purge_job, remote_status, sync_metadata
@@ -25,6 +26,16 @@ def config_command(argv: Sequence[str]) -> int:
         print(f"remote root:   {remote_root(cfg)}\ncommand dir:   {command_dirs(cfg)[0]}\nstate dir:     {state_dir(cfg)}\ncleanup:       {cleanup_policy(cfg)}\nverbosity:     {verbosity(cfg)}\nruntime repo:  {runtime_repo(cfg)}\nruntime ref:   {runtime_ref(cfg)}")
         return 0
     action=argv[0]
+    if action=="ssh":
+        ssh_args=list(argv[1:])
+        if ssh_args and ssh_args[0]=="--": ssh_args=ssh_args[1:]
+        if not ssh_args: raise SlError("usage: sl config ssh [ssh options] user@host")
+        vcfg=read_json(VCP_CONFIG_PATH,default={})
+        if not isinstance(vcfg,dict): raise SlError(f"invalid vcp config {VCP_CONFIG_PATH}: expected JSON object")
+        vcfg["ssh"]=ssh_args; write_json(VCP_CONFIG_PATH,vcfg)
+        print(f"saved SSH remote: {shlex.join(ssh_args)}")
+        ensure_worker_runtime(cfg,announce=True)
+        return config_command(["show"])
     if action=="remote-root":
         if len(argv)!=2 or not argv[1].startswith("/") or argv[1]=="/": raise SlError("usage: sl config remote-root /absolute/path")
         cfg["remote_root"]=argv[1].rstrip("/")
@@ -62,6 +73,7 @@ def usage() -> str:
 Usage:
   sl run [--detach] [--mem MEM] [--output-dir DIR] [--verbosity none|run|debug|full] [--no-fetch] [--keep-remote] COMMAND <operands...> [-- <command args...>]
   sl --command COMMAND <operands...> [-- <command args...>]
+  sl bootstrap
   sl jobs
   sl status JOB
   sl logs [-f] JOB
@@ -74,6 +86,7 @@ Usage:
   sl command show COMMAND
   sl gpu
   sl doctor
+  sl config ssh [ssh options] user@host
   sl config [show|...]
 
 Verbosity defaults to 'run': show workload output and major sl markers, while hiding
@@ -109,6 +122,11 @@ def parse_run(argv: Sequence[str], *, command_alias: str|None=None) -> argparse.
     return ns
 
 
+def bootstrap_command(argv: Sequence[str]) -> int:
+    if argv: raise SlError("usage: sl bootstrap")
+    cfg=sl_config(); ssh_argv(); ensure_worker_runtime(cfg,announce=True); return 0
+
+
 def doctor() -> int:
     cfg=sl_config(); failures=0
     print("Podlets Phase 1 doctor")
@@ -122,10 +140,13 @@ def doctor() -> int:
     result=ssh("for x in bash git python3 nvidia-smi; do command -v \"$x\" >/dev/null 2>&1 || { echo \"missing:$x\"; exit 1; }; done; echo ok\n",capture=True,check=False)
     if result.returncode==0: print("  worker:     OK  bash/git/python3/nvidia-smi")
     else: print(f"  worker:     FAIL {(result.stdout or result.stderr or '').strip()}"); failures+=1
+    runtime=probe_worker_runtime(cfg)
+    if runtime: print(f"  runtime:    OK  {runtime}")
+    else: print("  runtime:    MISSING (run: sl bootstrap)"); failures+=1
     try:
         total,free=remote_gpu_memory(); print(f"  GPU VRAM:   OK  {format_memory_mib(free)} free / {format_memory_mib(total)} total")
     except Exception as exc: print(f"  GPU VRAM:   FAIL {exc}"); failures+=1
-    print(f"  runtime:    {runtime_repo(cfg)} @ {runtime_ref(cfg)}")
+    print(f"  runtime ref:{runtime_repo(cfg)} @ {runtime_ref(cfg)}")
     return 1 if failures else 0
 
 
@@ -213,10 +234,11 @@ def main(argv: Sequence[str]|None=None) -> int:
     argv=list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in {"help","-h","--help"}: print(usage()); return 0
     cfg=sl_config()
-    if argv[0]=="run": return run_job(parse_run(argv[1:]))
+    if argv[0]=="run": ensure_worker_runtime(cfg); return run_job(parse_run(argv[1:]))
     if argv[0]=="--command":
         if len(argv)<2: raise SlError("usage: sl --command COMMAND <operands...> [-- <command args...>]")
-        return run_job(parse_run(argv[2:],command_alias=argv[1]))
+        ensure_worker_runtime(cfg); return run_job(parse_run(argv[2:],command_alias=argv[1]))
+    if argv[0]=="bootstrap": return bootstrap_command(argv[1:])
     if argv[0]=="jobs": return jobs(cfg)
     if argv[0]=="status" and len(argv)==2: return status(validate_job_id(argv[1]),cfg)
     if argv[0]=="logs":
