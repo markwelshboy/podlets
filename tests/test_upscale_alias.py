@@ -1,7 +1,7 @@
 from podlets.upscale_alias import parse_upscale
 
 
-def test_upscale_alias_keeps_job_options_and_forwards_model_options():
+def test_upscale_alias_uses_standard_double_dash_boundary():
     ns = parse_upscale(
         [
             "/data/input",
@@ -10,6 +10,7 @@ def test_upscale_alias_keeps_job_options_and_forwards_model_options():
             "/data/results",
             "--mem",
             "8G",
+            "--",
             "--model",
             "realesrgan-x2plus",
             "--all-images",
