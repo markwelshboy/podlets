@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import subprocess
 import sys
@@ -130,6 +131,8 @@ def bootstrap_command(argv: Sequence[str]) -> int:
 def doctor() -> int:
     cfg=sl_config(); failures=0
     print("Podlets Phase 1 doctor")
+    if os.environ.get("HF_TOKEN"): print("  HF_TOKEN:   OK  controller token available")
+    else: print("  HF_TOKEN:   FAIL not set on controller"); failures+=1
     try: print(f"  vcp:        OK  {vcp_path(cfg)}")
     except SlError as exc: print(f"  vcp:        FAIL {exc}"); failures+=1
     try: print(f"  ssh config: OK  {shlex.join(ssh_argv())}")
@@ -234,10 +237,10 @@ def main(argv: Sequence[str]|None=None) -> int:
     argv=list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in {"help","-h","--help"}: print(usage()); return 0
     cfg=sl_config()
-    if argv[0]=="run": ensure_worker_runtime(cfg); return run_job(parse_run(argv[1:]))
+    if argv[0]=="run": return run_job(parse_run(argv[1:]))
     if argv[0]=="--command":
         if len(argv)<2: raise SlError("usage: sl --command COMMAND <operands...> [-- <command args...>]")
-        ensure_worker_runtime(cfg); return run_job(parse_run(argv[2:],command_alias=argv[1]))
+        return run_job(parse_run(argv[2:],command_alias=argv[1]))
     if argv[0]=="bootstrap": return bootstrap_command(argv[1:])
     if argv[0]=="jobs": return jobs(cfg)
     if argv[0]=="status" and len(argv)==2: return status(validate_job_id(argv[1]),cfg)
