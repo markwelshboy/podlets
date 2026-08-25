@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import sys
 from pathlib import Path
 from typing import Dict
 
+from .bootstrap import ensure_worker_runtime
 from .common import SlError, cleanup_policy, command_dirs, info, job_id, local_job_dir, read_json, remote_job_dir, remote_root, runtime_ref, runtime_repo, sl_config, ssh, ssh_argv, state_dir, validate_job_id, validate_output_dir, verbosity, warn, write_json
 from .memory import format_memory_mib, preflight_capacity
 from .remote import clean_remote_job, fetch_outputs, follow_remote_log, launch_job, load_manifest, local_status, mark_complete, prepare_remote_job, purge_job, remote_status, stage_inputs, sync_metadata
@@ -14,10 +16,14 @@ from .spec import CommandSpec, build_arg_values, build_run_script, find_command,
 
 
 def run_job(args: argparse.Namespace) -> int:
-    cfg = sl_config(); ssh_argv()
+    cfg = sl_config()
     spec = find_command(args.command, cfg)
     mode = verbosity(cfg, getattr(args, "verbosity", None))
     output_dir = validate_output_dir(Path(args.output_dir) if args.output_dir else Path("."))
+    if not os.environ.get("HF_TOKEN"):
+        raise SlError("HF_TOKEN is not set on the controller")
+    ssh_argv()
+    ensure_worker_runtime(cfg)
     requested_mem = args.mem
     if requested_mem is not None and not spec.memcheck:
         raise SlError(f"command {spec.name} does not declare '# sl:memcheck'; refusing --mem")
