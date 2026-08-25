@@ -12,10 +12,11 @@ class BootstrapTests(unittest.TestCase):
         script = bootstrap.build_bootstrap_script({})
         self.assertIn('/workspace/.sl/runtime/pod-runtime', script)
         self.assertIn('/workspace/pod-runtime', script)
-        self.assertIn('/workspace/pod_runtime', script)
+        self.assertNotIn('/workspace/pod_runtime', script)
         self.assertIn('python3 -m venv', script)
         self.assertIn('apt-get install -y', script)
         self.assertIn('helpers_shell.sh', script)
+        self.assertLess(script.index('packages=()'), script.index('if [[ -n "$existing" ]]'))
 
     def test_ensure_worker_runtime_accepts_bootstrapped_response(self):
         result = type('Result', (), {
