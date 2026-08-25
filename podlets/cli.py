@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import List, Sequence
 
-from .common import SL_CONFIG_PATH, VCP_CONFIG_PATH, SlError, cleanup_policy, command_dirs, remote_job_dir, remote_root, runtime_ref, runtime_repo, sl_config, ssh, ssh_argv, state_dir, validate_job_id, vcp_path, verbosity, write_sl_config
+from .common import ACTIVE_STATES, SL_CONFIG_PATH, VCP_CONFIG_PATH, SlError, cleanup_policy, command_dirs, info, remote_job_dir, remote_root, runtime_ref, runtime_repo, sl_config, ssh, ssh_argv, state_dir, validate_job_id, vcp_path, verbosity, write_sl_config
 from .jobs import command_show, commands, jobs, logs, run_job, status, tail
 from .memory import format_memory_mib, remote_gpu_memory
 from .remote import clean_remote_job, fetch_outputs, local_status, mark_complete, purge_job, remote_status, sync_metadata
@@ -66,6 +66,7 @@ Usage:
   sl status JOB
   sl logs [-f] JOB
   sl tail [-n N] [--no-follow] JOB
+  sl cancel JOB
   sl fetch [--output-dir DIR] [--verbosity none|run|debug|full] JOB
   sl clean JOB
   sl purge [--force] JOB
@@ -137,6 +138,59 @@ def gpu() -> int:
     return 0
 
 
+def cancel_command(argv: Sequence[str]) -> int:
+    if len(argv) != 1:
+        raise SlError("usage: sl cancel JOB")
+    cfg=sl_config(); jid=validate_job_id(argv[0])
+    st=remote_status(jid,cfg,allow_missing=True)
+    if st is None:
+        raise SlError(f"remote job not found: {jid}")
+    state=str(st.get("state") or "UNKNOWN")
+    if state=="CANCELLED":
+        sync_metadata(jid,cfg); info(f"job {jid} is already CANCELLED"); return 0
+    if state not in ACTIVE_STATES:
+        raise SlError(f"refusing to cancel job {jid} in state {state}")
+    job=remote_job_dir(jid,cfg)
+    result=ssh(f'''set +e
+job={shlex.quote(job)}
+pidfile="$job/pid"
+if [[ ! -f "$pidfile" ]]; then
+  echo '[sl] ERROR: job has no remote pid yet; interrupt the submitting sl process if it is still staging' >&2
+  exit 3
+fi
+pid="$(cat "$pidfile")"
+if [[ ! "$pid" =~ ^[0-9]+$ ]]; then
+  echo '[sl] ERROR: invalid remote job pid' >&2
+  exit 3
+fi
+kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+sleep 1
+kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+now="$(date -Is)"
+printf '%s [sl] job cancelled by controller\\n' "$now" >> "$job/job.log"
+printf '%s [sl] job cancelled by controller\\n' "$now" >> "$job/display.log"
+python3 - "$job/status.json" "$now" <<'PY_CANCEL'
+import json, pathlib, sys
+p=pathlib.Path(sys.argv[1]); now=sys.argv[2]
+try: data=json.loads(p.read_text(encoding="utf-8"))
+except Exception: data={}
+data["state"]="CANCELLED"
+data["exit_code"]=None
+data["completed_at"]=now
+data["cancelled_at"]=now
+tmp=p.with_suffix(".tmp")
+tmp.write_text(json.dumps(data, indent=2)+"\\n", encoding="utf-8")
+tmp.replace(p)
+PY_CANCEL
+''',capture=True,check=False)
+    if result.returncode != 0:
+        detail=(result.stderr or result.stdout or "").strip()
+        raise SlError(detail or f"could not cancel job {jid}")
+    sync_metadata(jid,cfg)
+    info(f"cancelled job {jid}; logs and workspace retained")
+    return 0
+
+
 def fetch_command(argv: Sequence[str]) -> int:
     parser=argparse.ArgumentParser(prog="sl fetch")
     parser.add_argument("--output-dir")
@@ -169,6 +223,7 @@ def main(argv: Sequence[str]|None=None) -> int:
         p=argparse.ArgumentParser(prog="sl logs"); p.add_argument("-f","--follow",action="store_true"); p.add_argument("job"); ns=p.parse_args(argv[1:]); return logs(ns.job,cfg,follow=ns.follow)
     if argv[0]=="tail":
         p=argparse.ArgumentParser(prog="sl tail"); p.add_argument("-n",type=int,default=100); p.add_argument("--no-follow",action="store_true"); p.add_argument("job"); ns=p.parse_args(argv[1:]); return tail(ns.job,cfg,lines=ns.n,follow=not ns.no_follow)
+    if argv[0]=="cancel": return cancel_command(argv[1:])
     if argv[0]=="fetch": return fetch_command(argv[1:])
     if argv[0]=="clean" and len(argv)==2: clean_remote_job(validate_job_id(argv[1]),cfg); sync_metadata(argv[1],cfg); return 0
     if argv[0]=="purge":
@@ -188,5 +243,5 @@ def entrypoint() -> int:
     except KeyboardInterrupt: return _error("interrupted",130)
 
 
-def _error(message: str,code: int) -> int:
+def _error(message: str,code:int) -> int:
     print(f"[sl] ERROR: {message}",file=sys.stderr); return code
