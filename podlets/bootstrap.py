@@ -10,11 +10,8 @@ def _runtime_candidates(cfg: dict) -> list[str]:
     return [
         private,
         "/workspace/pod-runtime",
-        "/workspace/pod_runtime",
         "/opt/pod-runtime",
-        "/opt/pod_runtime",
         "/workspace/git/pod-runtime",
-        "/workspace/git/pod_runtime",
     ]
 
 
