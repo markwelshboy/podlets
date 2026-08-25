@@ -27,11 +27,12 @@ def build_bootstrap_script(cfg: dict) -> str:
 runtime={shlex.quote(private)}
 repo={repo}
 ref={ref}
+existing=""
 
 for cand in {candidates}; do
   if [[ -f "$cand/helpers_shell.sh" ]]; then
-    printf 'existing\\t%s\\n' "$cand"
-    exit 0
+    existing="$cand"
+    break
   fi
 done
 
@@ -64,6 +65,11 @@ if ! python3 -m venv "$probe" >/dev/null 2>&1; then
   exit 127
 fi
 rm -rf "$probe"
+
+if [[ -n "$existing" ]]; then
+  printf 'existing\\t%s\\n' "$existing"
+  exit 0
+fi
 
 mkdir -p "$(dirname "$runtime")"
 if [[ -d "$runtime/.git" ]]; then
