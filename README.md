@@ -13,7 +13,9 @@ On the controller machine:
 - Python 3.10+
 - `ssh`
 - `vcp` from [`markwelshboy/pod-runtime`](https://github.com/markwelshboy/pod-runtime)
-- `HF_TOKEN` available when `vcp` needs it
+- `HF_TOKEN` in the controller environment
+
+The controller token is authoritative for ordinary Podlets use. A rented worker does **not** need `HF_TOKEN` baked into its template: `vcp` injects the controller token for each transfer and `sl` injects it into each detached workload. The minimal Podlets bootstrap does not persist the token on the worker.
 
 A worker normally needs `bash`, `git`, `python3` with venv support, and `nvidia-smi`. `sl` can bootstrap `git`/Python venv support automatically on a root-accessible apt-based template, and installs its private `pod-runtime` under `/workspace/.sl/runtime/pod-runtime` when no existing runtime is available.
 
@@ -33,7 +35,7 @@ sl doctor
 sl commands
 ```
 
-`sl config ssh` writes the same `~/.config/vcp/config.json` SSH target used by `vcp`, verifies/bootstrap the worker immediately, and removes the old requirement to run a separate pod provisioning step before ordinary Podlets jobs. Normal `sl run` also performs an idempotent bootstrap check before staging inputs.
+`sl config ssh` writes the same `~/.config/vcp/config.json` SSH target used by `vcp`, verifies/bootstrap the worker immediately, and removes the old requirement to run a separate pod provisioning step before ordinary Podlets jobs. Normal `sl run` also performs an idempotent bootstrap check after local command/output validation and before staging inputs.
 
 To explicitly repair or bootstrap the currently configured worker:
 
