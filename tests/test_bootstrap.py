@@ -1,10 +1,11 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from podlets import bootstrap, cli, common
+from podlets import bootstrap, cli, common, jobs
 
 
 class BootstrapTests(unittest.TestCase):
@@ -41,13 +42,28 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(data['ssh'], ['-p', '1234', 'root@host'])
         ensure.assert_called_once_with({}, announce=True)
 
-    def test_run_auto_bootstraps_before_dispatch(self):
-        calls = []
+    def test_cli_dispatches_run_without_prebootstrap(self):
         with mock.patch.object(cli, 'sl_config', return_value={}), \
-             mock.patch.object(cli, 'ensure_worker_runtime', side_effect=lambda cfg: calls.append('bootstrap')), \
-             mock.patch.object(cli, 'run_job', side_effect=lambda args: calls.append('run') or 0):
+             mock.patch.object(cli, 'ensure_worker_runtime') as ensure, \
+             mock.patch.object(cli, 'run_job', return_value=0) as run:
             self.assertEqual(cli.main(['run', 'smoke']), 0)
-        self.assertEqual(calls, ['bootstrap', 'run'])
+        ensure.assert_not_called()
+        run.assert_called_once()
+
+    def test_invalid_command_does_not_bootstrap_worker(self):
+        args = cli.parse_run(['definitely-not-a-command'])
+        with mock.patch.object(jobs, 'ensure_worker_runtime') as ensure:
+            with self.assertRaises(common.SlError):
+                jobs.run_job(args)
+        ensure.assert_not_called()
+
+    def test_missing_controller_token_fails_before_bootstrap(self):
+        args = cli.parse_run(['smoke'])
+        with mock.patch.dict(os.environ, {'HF_TOKEN': ''}), \
+             mock.patch.object(jobs, 'ensure_worker_runtime') as ensure:
+            with self.assertRaisesRegex(common.SlError, 'HF_TOKEN is not set on the controller'):
+                jobs.run_job(args)
+        ensure.assert_not_called()
 
 
 if __name__ == '__main__':
