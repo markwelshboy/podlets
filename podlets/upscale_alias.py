@@ -10,6 +10,13 @@ from .jobs import run_job
 
 
 def parse_upscale(argv: Sequence[str]) -> argparse.Namespace:
+    raw = list(argv)
+    if len(raw) < 2 or raw[0].startswith("-") or raw[1].startswith("-"):
+        raise SlError(
+            "usage: sl upscale INPUT OUTPUT [job options] [model/upscale options]; "
+            "INPUT and OUTPUT must come first"
+        )
+
     parser = argparse.ArgumentParser(
         prog="sl upscale",
         description=(
@@ -18,16 +25,16 @@ def parse_upscale(argv: Sequence[str]) -> argparse.Namespace:
             "upscaler unchanged."
         ),
     )
+    parser.add_argument("input")
+    parser.add_argument("output")
     parser.add_argument("--detach", action="store_true")
     parser.add_argument("--mem")
     parser.add_argument("--output-dir", default=".")
     parser.add_argument("--verbosity", choices=["none", "run", "debug", "full"])
     parser.add_argument("--no-fetch", action="store_true")
     parser.add_argument("--keep-remote", action="store_true")
-    parser.add_argument("input")
-    parser.add_argument("output")
 
-    ns, extra = parser.parse_known_args(list(argv))
+    ns, extra = parser.parse_known_args(raw)
     ns.command = "upscale"
     ns.operands = [ns.input, ns.output]
     ns.extra = extra
