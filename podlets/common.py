@@ -15,6 +15,10 @@ from typing import List, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REMOTE_ROOT = "/workspace/.sl"
 DEFAULT_COMMAND_DIR = REPO_ROOT / "commands"
+DEFAULT_PODCRUMBS_COMMAND_DIRS = [
+    REPO_ROOT.parent / "podcrumbs" / "commands",
+    Path("~/git/podcrumbs/commands").expanduser(),
+]
 SL_CONFIG_PATH = Path(os.environ.get("SL_CONFIG", "~/.config/sl/config.json")).expanduser()
 VCP_CONFIG_PATH = Path(os.environ.get("VCP_CONFIG", "~/.config/vcp/config.json")).expanduser()
 DEFAULT_STATE_DIR = Path(os.environ.get("SL_STATE_DIR", "~/.local/state/sl/jobs")).expanduser()
@@ -108,6 +112,7 @@ def command_dirs(cfg: dict | None = None) -> List[Path]:
     if isinstance(raw, str) and raw:
         dirs.append(Path(raw).expanduser())
     dirs.append(DEFAULT_COMMAND_DIR)
+    dirs.extend(DEFAULT_PODCRUMBS_COMMAND_DIRS)
     seen: set[str] = set()
     result: List[Path] = []
     for path in dirs:
