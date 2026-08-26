@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import List, Sequence
 
+from .appmeta import command_config, command_controls, command_help
 from .bootstrap import ensure_worker_runtime, probe_worker_runtime
 from .common import ACTIVE_STATES, SL_CONFIG_PATH, VCP_CONFIG_PATH, SlError, cleanup_policy, command_dirs, info, read_json, remote_job_dir, remote_root, runtime_ref, runtime_repo, sl_config, ssh, ssh_argv, state_dir, validate_job_id, vcp_path, verbosity, write_json, write_sl_config
 from .jobs import command_show, commands, jobs, logs, run_job, status, tail
@@ -84,6 +85,9 @@ Usage:
   sl clean JOB
   sl purge [--force] JOB
   sl commands
+  sl command help COMMAND
+  sl command controls COMMAND
+  sl command config COMMAND
   sl command show COMMAND
   sl gpu
   sl doctor
@@ -254,6 +258,9 @@ def main(argv: Sequence[str]|None=None) -> int:
     if argv[0]=="purge":
         p=argparse.ArgumentParser(prog="sl purge"); p.add_argument("--force",action="store_true"); p.add_argument("job"); ns=p.parse_args(argv[1:]); purge_job(validate_job_id(ns.job),cfg,force=ns.force); return 0
     if argv[0]=="commands": return commands(cfg)
+    if argv[0:2]==["command","help"] and len(argv)==3: return command_help(argv[2],cfg)
+    if argv[0:2]==["command","controls"] and len(argv)==3: return command_controls(argv[2],cfg)
+    if argv[0:2]==["command","config"] and len(argv)==3: return command_config(argv[2],cfg)
     if argv[0:2]==["command","show"] and len(argv)==3: return command_show(argv[2],cfg)
     if argv[0]=="gpu": return gpu()
     if argv[0]=="doctor": return doctor()
