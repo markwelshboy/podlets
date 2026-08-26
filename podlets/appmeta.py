@@ -111,16 +111,43 @@ def _format_default(value: Any) -> str:
     return str(value)
 
 
+def _operand_usage(spec: CommandSpec) -> list[tuple[int, str, str]]:
+    required = max(spec.inputs + spec.outputs + [0])
+    inputs = set(spec.inputs)
+    outputs = set(spec.outputs)
+    rows: list[tuple[int, str, str]] = []
+    input_count = len(spec.inputs)
+    output_count = len(spec.outputs)
+    for idx in range(1, required + 1):
+        if idx in inputs:
+            label = "INPUT" if input_count == 1 else f"INPUT{idx}"
+            role = "input"
+        elif idx in outputs:
+            label = "OUTPUT" if output_count == 1 else f"OUTPUT{idx}"
+            role = "output"
+        else:
+            label = f"ARG{idx}"
+            role = "argument"
+        rows.append((idx, label, role))
+    return rows
+
+
 def command_help(name: str, cfg: dict) -> int:
     spec = find_command(name, cfg)
     root = app_dir(spec)
     controls = load_controls(root / "controls.yaml")
     title = _app_title(root, spec.description or spec.name)
+    operands = _operand_usage(spec)
+    usage = " ".join(label for _, label, _ in operands)
     print(f"{spec.name} — {title}")
     print()
-    print(f"Run: sl run {spec.name} <operands...> -- [controls]")
-    print(f"Inputs:  {', '.join(map(str, spec.inputs)) or '-'}")
-    print(f"Outputs: {', '.join(map(str, spec.outputs)) or '-'}")
+    print(f"Run: sl run {spec.name}{(' ' + usage) if usage else ''} -- [controls]")
+    if operands:
+        print("Operands:")
+        for idx, label, role in operands:
+            print(f"  {idx}: {label:<8} {role}")
+    else:
+        print("Operands: none")
     print()
     print("Controls:")
     for control, meta in controls.items():
