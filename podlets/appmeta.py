@@ -153,13 +153,14 @@ def command_help(name: str, cfg: dict) -> int:
     for control, meta in controls.items():
         flag = str(meta.get("flag") or "")
         kind = str(meta.get("type") or "string")
-        metavar = str(meta.get("metavar") or ("VALUE" if kind not in {"boolean"} else ""))
+        no_value = kind in {"flag", "toggle"}
+        metavar = str(meta.get("metavar") or ("" if no_value else "VALUE"))
         suffix = ""
         if kind == "multi_choice":
             suffix = f" {metavar}..."
-        elif kind != "boolean":
+        elif not no_value:
             suffix = f" {metavar}"
-        negative = meta.get("negative_flag")
+        negative = meta.get("negative_flag") if kind == "toggle" else None
         flags = flag + suffix
         if negative:
             flags += f" / {negative}"
