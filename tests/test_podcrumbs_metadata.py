@@ -37,10 +37,15 @@ class PodcrumbMetadataTests(unittest.TestCase):
             "    choices: [rmbg2, birefnet_hr]\n"
             "    default: [birefnet_hr]\n"
             "    help: Methods to run.\n"
+            "  compare:\n"
+            "    flag: --compare\n"
+            "    type: flag\n"
+            "    default: false\n"
+            "    help: Render comparisons.\n"
             "  recursive:\n"
             "    flag: --recursive\n"
             "    negative_flag: --no-recursive\n"
-            "    type: boolean\n"
+            "    type: toggle\n"
             "    default: true\n"
             "    help: Scan subdirectories.\n",
             encoding="utf-8",
@@ -62,6 +67,8 @@ class PodcrumbMetadataTests(unittest.TestCase):
         self.assertIn("--methods METHOD...", text)
         self.assertIn("Choices: rmbg2, birefnet_hr", text)
         self.assertIn("Default: birefnet_hr", text)
+        self.assertIn("  --compare\n", text)
+        self.assertNotIn("--compare VALUE", text)
         self.assertIn("--recursive / --no-recursive", text)
 
     def test_controls_and_structural_config_are_separate_views(self):
