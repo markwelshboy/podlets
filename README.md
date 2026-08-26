@@ -65,6 +65,28 @@ sl jobs
 sl tail JOB_ID
 ```
 
+## Podcrumb application catalog
+
+If [`podcrumbs`](https://github.com/markwelshboy/podcrumbs) is checked out as a sibling of Podlets or at `~/git/podcrumbs`, its `commands/` catalog is discovered automatically after built-in commands. An explicit `sl config command-dir PATH` still has highest precedence.
+
+Podcrumb commands may declare `# sl:app APP`. That enables controller-side inspection without starting or provisioning a GPU job:
+
+```bash
+sl command help bg-remove
+sl command controls bg-remove
+sl command config bg-remove
+sl command show bg-remove
+```
+
+These views are deliberately different:
+
+- `help` renders the declared user-facing controls and defaults.
+- `controls` prints the app's `controls.yaml` declaration.
+- `config` prints its structural `config.yaml` implementation/capabilities.
+- `show` prints the low-level `.cmd` adapter.
+
+Podlets does not require PyYAML for this inspection path; the public controls contract intentionally uses a small flat YAML shape while structural configuration remains opaque to Podlets.
+
 ## SeedVR2
 
 ```bash
@@ -105,6 +127,9 @@ sl fetch JOB
 sl clean JOB
 sl purge [--force] JOB
 sl commands
+sl command help COMMAND
+sl command controls COMMAND
+sl command config COMMAND
 sl command show COMMAND
 sl gpu
 sl doctor
