@@ -1,7 +1,7 @@
 # sl:name qwen-caption-all
 # sl:description Run the governed Fusion 2.3.3 / Projection 1.3.5 caption pipeline on a cached dataset and return a tar
 # sl:output 5
-# sl:setup-version 1
+# sl:setup-version 2
 # sl:memcheck
 
 _qwen_caption_paths() {
@@ -20,6 +20,25 @@ _qwen_caption_validate_key() {
     echo "ERROR: $label must contain only letters, numbers, dot, underscore, or dash: $value" >&2
     return 2
   fi
+}
+
+_qwen_caption_stage() {
+  local label="$1" log_file="$2" rc
+  shift 2
+  mkdir -p "$(dirname "$log_file")"
+  : > "$log_file"
+  echo "Stage: $label"
+  "$@" > >(tee -a "$log_file") 2> >(tee -a "$log_file" >&2)
+  rc=$?
+  if (( rc != 0 )); then
+    echo "ERROR: stage '$label' failed with exit $rc (log: $log_file)" | tee -a "$log_file" >&2
+    return "$rc"
+  fi
+}
+
+_qwen_caption_count_files() {
+  local dir="$1" pattern="$2"
+  find "$dir" -maxdepth 1 -type f -name "$pattern" -print 2>/dev/null | wc -l | tr -d '[:space:]'
 }
 
 sl_prepare() {
@@ -81,9 +100,13 @@ sl_setup() {
   QWEN_WORKSPACE_ROOT="$QCAP_QWEN_WS" \
     bash "$QCAP_REPO/build_workspace.sh"
 
-  echo "Building/reusing Qwen vLLM workspace"
+  # setup-version 2 intentionally rebuilds this environment from scratch. The
+  # previous cached venv may contain vLLM/Torch cu129, which cannot run on some
+  # NVIDIA 570-series rented-pod drivers. The requested repository ref owns the
+  # exact CUDA-compatible stack selected by build_vllm_workspace.sh.
+  echo "Rebuilding Qwen vLLM workspace"
   QWEN_VLLM_WORKSPACE_ROOT="$QCAP_VLLM_WS" \
-    bash "$QCAP_REPO/build_vllm_workspace.sh"
+    bash "$QCAP_REPO/build_vllm_workspace.sh" --clean
 
   echo "Building/reusing isolated SAM3D workspace"
   SAM3D_WORKSPACE_ROOT="$QCAP_SAM3D_WS" \
@@ -100,10 +123,12 @@ sl_run() {
   local dataset_dir="$QCAP_DATASETS/$dataset_key"
   local image_dir="$dataset_dir/images"
   local run_dir="$QCAP_RUNS/$run_name"
+  local logs_dir="$run_dir/logs"
   local caption_export="$run_dir/caption-export"
   local compose_label="8b-bf16-governance135"
   local repair_label="${compose_label}-repair1"
   local actual_sha dataset_sha provenance model_slug fusion_model_dir
+  local expected_count analysis_count fusion_count final_fusion_count
 
   actual_sha="$(git -C "$QCAP_REPO" rev-parse HEAD)"
   dataset_sha="$(python3 - "$dataset_dir/dataset.json" <<'PY'
@@ -137,6 +162,7 @@ PY
   else
     mkdir -p "$run_dir"
   fi
+  mkdir -p "$logs_dir"
 
   python3 - "$provenance" "$dataset_key" "$dataset_sha" "$run_name" "$subject_token" "$requested_ref" "$actual_sha" "$compose_label" "$repair_label" <<'PY'
 import json, pathlib, sys
@@ -186,8 +212,16 @@ PY
     return 1
   fi
 
-  echo "Stage: Analyze v2.1 (32B FP8 / vLLM)"
-  QWEN_WORKSPACE_ROOT="$QCAP_VLLM_WS" \
+  model_slug="$(
+    cd "$QCAP_REPO"
+    "$QCAP_QWEN_WS/.venv/bin/python" - <<'PY'
+from qwen_caption_validate.runner import model_slug, resolve_model_id
+print(model_slug(resolve_model_id('32b-fp8')))
+PY
+  )"
+
+  _qwen_caption_stage "Analyze v2.1 (32B FP8 / vLLM)" "$logs_dir/analyze-v2.1.log" \
+    env QWEN_WORKSPACE_ROOT="$QCAP_VLLM_WS" \
     bash "$QCAP_REPO/run_analysis_v2_1_workspace.sh" \
       "$image_dir" \
       --models 32b-fp8 \
@@ -196,69 +230,85 @@ PY
       --run-name "$run_name" \
       --recursive \
       --subject-token "$subject_token" \
-      --detail balanced
+      --detail balanced || return $?
 
-  echo "Stage: DWPose"
-  QWEN_WORKSPACE_ROOT="$QCAP_QWEN_WS" \
+  expected_count="$(python3 - "$run_dir/run.json" <<'PY'
+import json, sys
+print(len(json.load(open(sys.argv[1], encoding='utf-8')).get('images') or []))
+PY
+)"
+  analysis_count="$(_qwen_caption_count_files "$run_dir/$model_slug" '*.analysis.json')"
+  echo "Analyze records: $analysis_count / $expected_count"
+  if [[ "$expected_count" == "0" || "$analysis_count" != "$expected_count" ]]; then
+    echo "ERROR: Analyze record count mismatch; refusing to run downstream stages" >&2
+    return 1
+  fi
+
+  _qwen_caption_stage "DWPose" "$logs_dir/dwpose.log" \
+    env QWEN_WORKSPACE_ROOT="$QCAP_QWEN_WS" \
     bash "$QCAP_REPO/run_dwpose_workspace.sh" \
       "$image_dir" \
       --output "$run_dir/dwpose" \
       --recursive \
-      --device auto
+      --device auto || return $?
 
-  echo "Stage: SAM3D"
-  SAM3D_WORKSPACE_ROOT="$QCAP_SAM3D_WS" \
+  _qwen_caption_stage "SAM3D" "$logs_dir/sam3d.log" \
+    env SAM3D_WORKSPACE_ROOT="$QCAP_SAM3D_WS" \
     bash "$QCAP_REPO/run_sam3d_probe_workspace.sh" \
       "$image_dir" \
       --dwpose-dir "$run_dir/dwpose" \
       --output "$run_dir/sam3d" \
       --bbox-source dwpose \
       --inference-type body \
-      --no-save-mesh
+      --no-save-mesh || return $?
 
-  echo "Stage: Fusion v2.3"
-  QWEN_WORKSPACE_ROOT="$QCAP_QWEN_WS" \
+  _qwen_caption_stage "Fusion v2.3" "$logs_dir/fusion-v2.3.log" \
+    env QWEN_WORKSPACE_ROOT="$QCAP_QWEN_WS" \
     bash "$QCAP_REPO/run_fusion_v2_3_workspace.sh" \
       "$run_dir" \
       --model 32b-fp8 \
       --dwpose-dir "$run_dir/dwpose" \
-      --sam3d-dir "$run_dir/sam3d"
+      --sam3d-dir "$run_dir/sam3d" || return $?
 
-  echo "Stage: Fusion v2.3.1 laterality refinement"
-  QWEN_WORKSPACE_ROOT="$QCAP_QWEN_WS" \
+  fusion_count="$(_qwen_caption_count_files "$run_dir/fusion-v2.3/$model_slug" '*.fused_v2_3.json')"
+  echo "Fusion v2.3 records: $fusion_count / $expected_count"
+  if [[ "$fusion_count" != "$expected_count" ]]; then
+    echo "ERROR: Fusion v2.3 record count mismatch; refusing to continue" >&2
+    return 1
+  fi
+
+  _qwen_caption_stage "Fusion v2.3.1 laterality refinement" "$logs_dir/fusion-v2.3.1.log" \
+    env QWEN_WORKSPACE_ROOT="$QCAP_QWEN_WS" \
     bash "$QCAP_REPO/run_laterality_refine_workspace.sh" \
       "$run_dir" \
-      --model 32b-fp8
+      --model 32b-fp8 || return $?
 
-  echo "Stage: Fusion v2.3.2 bilateral collision guard"
-  QWEN_WORKSPACE_ROOT="$QCAP_QWEN_WS" \
-  QWEN_REPO_ROOT="$QCAP_REPO" \
+  _qwen_caption_stage "Fusion v2.3.2 bilateral collision guard" "$logs_dir/fusion-v2.3.2.log" \
+    env QWEN_WORKSPACE_ROOT="$QCAP_QWEN_WS" QWEN_REPO_ROOT="$QCAP_REPO" \
     bash "$QCAP_REPO/run_laterality_bilateral_guard_workspace.sh" \
       "$run_dir" \
-      --model 32b-fp8
+      --model 32b-fp8 || return $?
 
-  echo "Stage: Fusion v2.3.3 signed depth refinement"
-  QWEN_WORKSPACE_ROOT="$QCAP_QWEN_WS" \
+  _qwen_caption_stage "Fusion v2.3.3 signed depth refinement" "$logs_dir/fusion-v2.3.3.log" \
+    env QWEN_WORKSPACE_ROOT="$QCAP_QWEN_WS" \
     bash "$QCAP_REPO/run_signed_depth_refine_workspace.sh" \
       "$run_dir" \
-      --model 32b-fp8
+      --model 32b-fp8 || return $?
 
-  model_slug="$(
-    cd "$QCAP_REPO"
-    "$QCAP_QWEN_WS/.venv/bin/python" - <<'PY'
-from qwen_caption_validate.runner import model_slug, resolve_model_id
-print(model_slug(resolve_model_id('32b-fp8')))
-PY
-  )"
   fusion_model_dir="$run_dir/fusion-v2.3.3/$model_slug"
-
   if [[ ! -d "$fusion_model_dir" ]]; then
     echo "ERROR: expected Fusion 2.3.3 output missing: $fusion_model_dir" >&2
     return 1
   fi
+  final_fusion_count="$(_qwen_caption_count_files "$fusion_model_dir" '*.fused_v2_3_3.json')"
+  echo "Fusion v2.3.3 records: $final_fusion_count / $expected_count"
+  if [[ "$final_fusion_count" != "$expected_count" ]]; then
+    echo "ERROR: Fusion v2.3.3 record count mismatch; refusing to run Projection" >&2
+    return 1
+  fi
 
-  echo "Stage: Projection 1.3.5 + Compose (8B BF16, fusion-safe)"
-  QWEN_WORKSPACE_ROOT="$QCAP_QWEN_WS" \
+  _qwen_caption_stage "Projection 1.3.5 + Compose (8B BF16, fusion-safe)" "$logs_dir/projection-1.3.5.log" \
+    env QWEN_WORKSPACE_ROOT="$QCAP_QWEN_WS" \
     bash "$QCAP_REPO/run_compose_governance_135_workspace.sh" \
       "$run_dir" \
       --analysis-model 32b-fp8 \
@@ -270,10 +320,10 @@ PY
       --detail balanced \
       --subject-token "$subject_token" \
       --variants fusion-safe \
-      --run-label "$compose_label"
+      --run-label "$compose_label" || return $?
 
-  echo "Stage: one-shot lint repair + final caption export"
-  QWEN_WORKSPACE_ROOT="$QCAP_QWEN_WS" \
+  _qwen_caption_stage "one-shot lint repair + final caption export" "$logs_dir/lint-repair.log" \
+    env QWEN_WORKSPACE_ROOT="$QCAP_QWEN_WS" \
     bash "$QCAP_REPO/run_compose_lint_repair_135_workspace.sh" \
       "$run_dir" \
       --analysis-model 32b-fp8 \
@@ -283,7 +333,7 @@ PY
       --backend transformers \
       --quantization none \
       --dtype bfloat16 \
-      --export-caption-dir "$caption_export"
+      --export-caption-dir "$caption_export" || return $?
 
   if [[ ! -f "$caption_export/caption_export.index.json" ]]; then
     echo "ERROR: caption export index missing: $caption_export/caption_export.index.json" >&2
