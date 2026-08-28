@@ -300,7 +300,7 @@ PY
     echo "ERROR: expected Fusion 2.3.3 output missing: $fusion_model_dir" >&2
     return 1
   fi
-  final_fusion_count="$(_qwen_caption_count_files "$fusion_model_dir" '*.fused_v2_3_3.json')"
+  final_fusion_count="$(_qwen_caption_count_files "$fusion_model_dir" '*.fused_v2_3.json')"
   echo "Fusion v2.3.3 records: $final_fusion_count / $expected_count"
   if [[ "$final_fusion_count" != "$expected_count" ]]; then
     echo "ERROR: Fusion v2.3.3 record count mismatch; refusing to run Projection" >&2
