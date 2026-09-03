@@ -131,6 +131,7 @@ def entrypoint(argv: Sequence[str] | None = None) -> int:
             projection = targets.create_projection(selected)
             os.environ["VCP_CONFIG"] = str(projection)
             os.environ["SL_TARGET_NAME"] = selected
+            print(f"[sl] target: {selected}", file=sys.stderr)
 
         _patch_manifest_target()
         sys.argv = [sys.argv[0], *forwarded]
