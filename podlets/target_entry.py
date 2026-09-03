@@ -34,9 +34,8 @@ def _target_command(argv: Sequence[str]) -> int:
     return 0
 
 
-def _patch_manifest_target(target_name: str | None) -> None:
-    if not target_name:
-        return
+def _patch_manifest_target() -> None:
+    """Teach new job manifests to remember whichever target this process uses."""
     from . import spec
 
     original = spec.manifest_for_job
@@ -45,7 +44,9 @@ def _patch_manifest_target(target_name: str | None) -> None:
 
     def wrapped(*args, **kwargs):
         manifest = original(*args, **kwargs)
-        manifest["target"] = target_name
+        target_name = os.environ.get("SL_TARGET_NAME")
+        if target_name:
+            manifest["target"] = target_name
         return manifest
 
     wrapped._sl_target_wrapped = True  # type: ignore[attr-defined]
@@ -70,7 +71,8 @@ def _configure_active_named_ssh(argv: Sequence[str]) -> int | None:
     ssh_args = args[2:]
     selected = targets.configure_active_ssh(ssh_args)
     assert selected == active
-    print(f"saved SSH target {active}: {shlex.join(list(ssh_args))}")
+    shown_args = list(ssh_args[1:]) if ssh_args and ssh_args[0] == "--" else list(ssh_args)
+    print(f"saved SSH target {active}: {shlex.join(shown_args)}")
 
     projection = targets.create_projection(active)
     old_vcp = os.environ.get("VCP_CONFIG")
@@ -117,13 +119,20 @@ def entrypoint(argv: Sequence[str] | None = None) -> int:
             return configured
 
         forwarded, explicit = targets.consume_global_target(args)
-        selected = targets.selected_target(forwarded, explicit)
+        recorded = targets.job_target(forwarded)
+        if explicit and recorded and explicit != recorded:
+            jid = targets.job_id_from_argv(forwarded) or "job"
+            raise targets.TargetError(
+                f"{jid} belongs to target {recorded!r}; refusing explicit target {explicit!r}"
+            )
+        selected = explicit or recorded or targets.active_target(targets.read_vcp_config())
         if selected:
+            # Validates existence and SSH configuration before any remote work.
             projection = targets.create_projection(selected)
             os.environ["VCP_CONFIG"] = str(projection)
             os.environ["SL_TARGET_NAME"] = selected
 
-        _patch_manifest_target(selected)
+        _patch_manifest_target()
         sys.argv = [sys.argv[0], *forwarded]
 
         from .cli import entrypoint as cli_entrypoint
