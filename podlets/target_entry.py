@@ -14,6 +14,20 @@ def _error(message: str, code: int = 1) -> int:
     return code
 
 
+def _usage() -> str:
+    from .cli import usage
+
+    return (
+        usage().rstrip()
+        + "\n\nNamed targets:\n"
+        + "  sl targets\n"
+        + "  sl target [NAME]\n"
+        + "  sl --target NAME <command...>\n\n"
+        + "The active target is shared with vcp. New jobs remember their target, so\n"
+        + "later status/logs/fetch/cancel operations route back to the same pod.\n"
+    )
+
+
 def _target_command(argv: Sequence[str]) -> int:
     args = list(argv)
     cfg = targets.read_vcp_config()
@@ -107,11 +121,14 @@ def entrypoint(argv: Sequence[str] | None = None) -> int:
     old_target = os.environ.get("SL_TARGET_NAME")
 
     try:
-        if args and args[0] in {"targets", "list-targets"}:
+        if not args or args[0] in {"-h", "--help", "help"}:
+            print(_usage())
+            return 0
+        if args[0] in {"targets", "list-targets"}:
             if len(args) != 1:
                 raise targets.TargetError("usage: sl targets")
             return targets.print_targets()
-        if args and args[0] == "target":
+        if args[0] == "target":
             return _target_command(args)
 
         configured = _configure_active_named_ssh(args)
