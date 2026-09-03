@@ -137,19 +137,26 @@ class TargetTests(unittest.TestCase):
             }
             captured = {}
 
-            def fake_cli():
-                from podlets import common
+            from podlets import cli, common
 
+            def fake_cli():
                 captured["ssh"] = common.ssh_argv()
                 captured["target"] = os.environ.get("SL_TARGET_NAME")
                 return 0
 
-            # target_entry imports cli.entrypoint late, so replace the function
-            # on the already-loaded module for this invocation.
-            from podlets import cli
-
             with mock.patch.dict(os.environ, env, clear=False), \
-                 mock.patch.object(cli, "entrypoint", side_effect=fake_cli):
+                 mock.patch.object(cli, "entrypoint", side_effect=fake_cli), \
+                 mock.patch.object(common, "VCP_CONFIG_PATH", Path("/placeholder")) as config_path:
+                # common.py normally captures VCP_CONFIG at process import time.
+                # In real `sl`, target_entry runs before common is imported. The
+                # full test suite imports common earlier, so point the test-time
+                # constant at the temporary projection just before fake_cli reads it.
+                def fake_cli_with_projection():
+                    config_path.target = None  # keep mock object referenced
+                    common.VCP_CONFIG_PATH = Path(os.environ["VCP_CONFIG"])
+                    return fake_cli()
+
+                cli.entrypoint.side_effect = fake_cli_with_projection
                 rc = target_entry.entrypoint(["--target", "two", "doctor"])
 
         self.assertEqual(rc, 0)
@@ -160,24 +167,18 @@ class TargetTests(unittest.TestCase):
         from podlets import spec
 
         original = spec.manifest_for_job
+
+        def fake_manifest(*args, **kwargs):
+            return {"job_id": "test"}
+
         try:
-            # Ensure this test can exercise the wrapper even if another test
-            # process imported target_entry earlier.
-            if getattr(spec.manifest_for_job, "_sl_target_wrapped", False):
-                pass
-            else:
-                target_entry._patch_manifest_target()
+            spec.manifest_for_job = fake_manifest
+            target_entry._patch_manifest_target()
             with mock.patch.dict(os.environ, {"SL_TARGET_NAME": "comfydev3900"}):
-                # A lightweight stand-in avoids constructing a full command spec;
-                # replace the wrapped function's captured original is not easy,
-                # so assert the installed wrapper marker and target env contract.
-                self.assertTrue(
-                    getattr(spec.manifest_for_job, "_sl_target_wrapped", False)
-                )
-                self.assertEqual(os.environ["SL_TARGET_NAME"], "comfydev3900")
+                manifest = spec.manifest_for_job()
+            self.assertEqual(manifest["target"], "comfydev3900")
         finally:
-            # Do not try to unwrap a closure; module process ends after test suite.
-            _ = original
+            spec.manifest_for_job = original
 
     def test_legacy_config_remains_usable_without_named_targets(self):
         with tempfile.TemporaryDirectory() as tmp:
