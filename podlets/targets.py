@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 
 TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 JOB_ID_RE = re.compile(r"^[0-9]{8}_[0-9]{6}_[0-9a-f]{8}$")
+JOB_BOUND_COMMANDS = {"status", "logs", "tail", "cancel", "fetch", "clean", "purge"}
 DEFAULT_VCP_CONFIG = "~/.config/vcp/config.json"
 DEFAULT_SL_CONFIG = "~/.config/sl/config.json"
 DEFAULT_STATE_DIR = "~/.local/state/sl/jobs"
@@ -156,7 +157,10 @@ def _sl_state_dir(environ: Mapping[str, str] | None = None) -> Path:
 
 
 def job_id_from_argv(argv: Sequence[str]) -> str | None:
-    for arg in argv:
+    args = list(argv)
+    if not args or args[0] not in JOB_BOUND_COMMANDS:
+        return None
+    for arg in args[1:]:
         if JOB_ID_RE.fullmatch(arg):
             return arg
     return None
