@@ -45,6 +45,55 @@ sl bootstrap
 
 `sl` discovers the local `vcp` launcher from `SL_VCP`, `sl config vcp PATH`, `$PATH`, a sibling `../pod-runtime/vcp`, or `~/git/pod-runtime/vcp`.
 
+## Multiple named pod targets
+
+`sl` and `vcp` share the named target registry in `~/.config/vcp/config.json`. This lets several rented pods coexist without repeatedly replacing one global SSH endpoint.
+
+Create targets with VCP or automatically with `rent-pod --name NAME --vcp`:
+
+```bash
+vcp config l40development ssh -i ~/.ssh/id_ed25519_runpod -p 12234 root@HOST1
+vcp config rtx6000comfy ssh -i ~/.ssh/id_ed25519_runpod -p 13345 root@HOST2
+```
+
+List or select them from either tool:
+
+```bash
+sl targets
+sl target l40development
+
+vcp targets
+vcp target l40development
+```
+
+The active target is shared, so `vcp target l40development` also changes the default target used by the next `sl` command, and vice versa.
+
+Use a one-shot target without changing the active target:
+
+```bash
+sl --target rtx6000comfy run upscale INPUT OUTPUT --output-dir RESULTS
+vcp --target rtx6000comfy r:/workspace/report.txt .
+```
+
+When a new SL job is created on a named target, the target name is stored in the local job manifest. Later commands automatically route back to that same pod even if you have switched the global active target in the meantime:
+
+```bash
+sl target l40development
+sl --target rtx6000comfy run --detach upscale INPUT OUTPUT --output-dir RESULTS
+
+# Active target can change afterward...
+sl target l40development
+
+# ...but this job still routes to rtx6000comfy from its recorded manifest.
+sl status JOB_ID
+sl tail JOB_ID
+sl fetch JOB_ID
+```
+
+For safety, explicitly forcing a different target for a job already bound to another target is rejected instead of silently querying the wrong pod.
+
+If a named target is active, `sl config ssh ...` updates that named target's SSH endpoint. If no named target exists, the previous single-endpoint `~/.config/vcp/config.json` format remains fully supported.
+
 ## First smoke test
 
 ```bash
@@ -94,6 +143,9 @@ sl purge JOB
 ## Phase 1 CLI
 
 ```text
+sl targets
+sl target [NAME]
+sl --target NAME run ...
 sl run ...
 sl bootstrap
 sl jobs
