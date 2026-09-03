@@ -140,24 +140,21 @@ class TargetTests(unittest.TestCase):
             from podlets import cli, common
 
             def fake_cli():
+                # In the real `sl` process common.py is first imported after
+                # target_entry sets VCP_CONFIG. The full test suite imports it
+                # earlier, so emulate the real process ordering here.
+                common.VCP_CONFIG_PATH = Path(os.environ["VCP_CONFIG"])
                 captured["ssh"] = common.ssh_argv()
                 captured["target"] = os.environ.get("SL_TARGET_NAME")
                 return 0
 
-            with mock.patch.dict(os.environ, env, clear=False), \
-                 mock.patch.object(cli, "entrypoint", side_effect=fake_cli), \
-                 mock.patch.object(common, "VCP_CONFIG_PATH", Path("/placeholder")) as config_path:
-                # common.py normally captures VCP_CONFIG at process import time.
-                # In real `sl`, target_entry runs before common is imported. The
-                # full test suite imports common earlier, so point the test-time
-                # constant at the temporary projection just before fake_cli reads it.
-                def fake_cli_with_projection():
-                    config_path.target = None  # keep mock object referenced
-                    common.VCP_CONFIG_PATH = Path(os.environ["VCP_CONFIG"])
-                    return fake_cli()
-
-                cli.entrypoint.side_effect = fake_cli_with_projection
-                rc = target_entry.entrypoint(["--target", "two", "doctor"])
+            original_config_path = common.VCP_CONFIG_PATH
+            try:
+                with mock.patch.dict(os.environ, env, clear=False), \
+                     mock.patch.object(cli, "entrypoint", side_effect=fake_cli):
+                    rc = target_entry.entrypoint(["--target", "two", "doctor"])
+            finally:
+                common.VCP_CONFIG_PATH = original_config_path
 
         self.assertEqual(rc, 0)
         self.assertEqual(captured["ssh"], ["-p", "2222", "root@two"])
