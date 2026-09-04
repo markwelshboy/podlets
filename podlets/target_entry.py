@@ -71,12 +71,20 @@ def _bootstrap_target(name: str) -> None:
     old_target = os.environ.get("SL_TARGET_NAME")
     os.environ["VCP_CONFIG"] = str(projection)
     os.environ["SL_TARGET_NAME"] = name
+
+    # common.py caches VCP_CONFIG_PATH at import time. sl config ssh must import
+    # common once to locate the vcp launcher before this projection exists, so
+    # temporarily repoint the cached path as well as the environment variable.
+    from . import common
+
+    old_common_vcp_path = common.VCP_CONFIG_PATH
+    common.VCP_CONFIG_PATH = projection
     try:
         from .bootstrap import ensure_worker_runtime
-        from .common import sl_config
 
-        ensure_worker_runtime(sl_config(), announce=True)
+        ensure_worker_runtime(common.sl_config(), announce=True)
     finally:
+        common.VCP_CONFIG_PATH = old_common_vcp_path
         try:
             projection.unlink()
         except FileNotFoundError:
