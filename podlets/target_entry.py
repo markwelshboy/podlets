@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -22,9 +22,12 @@ def _usage() -> str:
         + "\n\nNamed targets:\n"
         + "  sl targets\n"
         + "  sl target [NAME]\n"
+        + "  sl config ssh [ssh options] user@host\n"
+        + "  sl config NAME ssh [ssh options] user@host\n"
         + "  sl --target NAME <command...>\n\n"
-        + "The active target is shared with vcp. New jobs remember their target, so\n"
-        + "later status/logs/fetch/cancel operations route back to the same pod.\n"
+        + "The active target is shared with vcp. SSH target registration is delegated\n"
+        + "to vcp, and new jobs remember their target so later status/logs/fetch/cancel\n"
+        + "operations route back to the same pod.\n"
     )
 
 
@@ -32,13 +35,7 @@ def _target_command(argv: Sequence[str]) -> int:
     args = list(argv)
     cfg = targets.read_vcp_config()
     if len(args) == 1:
-        active = targets.active_target(cfg)
-        if active:
-            print(active)
-        elif isinstance(cfg.get("ssh"), list) and cfg.get("ssh"):
-            print("<legacy/default>")
-        else:
-            print("<none>")
+        print(targets.active_target(cfg) or "<none>")
         return 0
     if len(args) != 2:
         raise targets.TargetError("usage: sl target [NAME]")
@@ -67,32 +64,13 @@ def _patch_manifest_target() -> None:
     spec.manifest_for_job = wrapped
 
 
-def _configure_active_named_ssh(argv: Sequence[str]) -> int | None:
-    """Handle `sl config ssh ...` when a named target is active.
-
-    The legacy SL implementation writes directly to VCP's top-level `ssh` key.
-    For named targets, update the active entry instead and still run the normal
-    worker bootstrap against that newly configured endpoint.
-    """
-    args = list(argv)
-    if len(args) < 2 or args[:2] != ["config", "ssh"]:
-        return None
-    cfg = targets.read_vcp_config()
-    active = targets.active_target(cfg)
-    if not active:
-        return None
-
-    ssh_args = args[2:]
-    selected = targets.configure_active_ssh(ssh_args)
-    assert selected == active
-    shown_args = list(ssh_args[1:]) if ssh_args and ssh_args[0] == "--" else list(ssh_args)
-    print(f"saved SSH target {active}: {shlex.join(shown_args)}")
-
-    projection = targets.create_projection(active)
+def _bootstrap_target(name: str) -> None:
+    """Bootstrap SL worker runtime against one already-configured named target."""
+    projection = targets.create_projection(name)
     old_vcp = os.environ.get("VCP_CONFIG")
     old_target = os.environ.get("SL_TARGET_NAME")
     os.environ["VCP_CONFIG"] = str(projection)
-    os.environ["SL_TARGET_NAME"] = active
+    os.environ["SL_TARGET_NAME"] = name
     try:
         from .bootstrap import ensure_worker_runtime
         from .common import sl_config
@@ -111,6 +89,46 @@ def _configure_active_named_ssh(argv: Sequence[str]) -> int | None:
             os.environ.pop("SL_TARGET_NAME", None)
         else:
             os.environ["SL_TARGET_NAME"] = old_target
+
+
+def _configure_ssh_via_vcp(argv: Sequence[str]) -> int | None:
+    """Delegate SL SSH target registration to VCP's canonical target logic.
+
+    Bare ``sl config ssh ...`` gets the same RunPod endpoint/name discovery as
+    ``vcp config ssh ...``. Named ``sl config NAME ssh ...`` saves that target
+    through VCP, activates it, then bootstraps the SL worker runtime.
+    """
+    args = list(argv)
+    if not args or args[0] != "config":
+        return None
+
+    named: str | None = None
+    if len(args) >= 2 and args[1] == "ssh":
+        pass
+    elif len(args) >= 3 and args[2] == "ssh":
+        named = targets.validate_target_name(args[1])
+    else:
+        return None
+
+    from .common import sl_config, vcp_path
+
+    command = [str(vcp_path(sl_config())), *args]
+    result = subprocess.run(command, check=False)
+    if result.returncode != 0:
+        return int(result.returncode)
+
+    if named is not None:
+        targets.set_active_target(named)
+        active = named
+        print(f"[sl] Active target: {active}")
+    else:
+        active = targets.active_target(targets.read_vcp_config())
+        if not active:
+            raise targets.TargetError(
+                "vcp SSH configuration succeeded without producing an active named target"
+            )
+
+    _bootstrap_target(active)
     return 0
 
 
@@ -131,7 +149,7 @@ def entrypoint(argv: Sequence[str] | None = None) -> int:
         if args[0] == "target":
             return _target_command(args)
 
-        configured = _configure_active_named_ssh(args)
+        configured = _configure_ssh_via_vcp(args)
         if configured is not None:
             return configured
 
