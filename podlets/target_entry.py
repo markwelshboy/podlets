@@ -132,6 +132,21 @@ def _configure_ssh_via_vcp(argv: Sequence[str]) -> int | None:
     return 0
 
 
+def _discard_unselected_legacy_ssh() -> None:
+    """Remove old persistent default SSH state before the legacy SL core can use it.
+
+    New temporary SL projections always include an active named target. Therefore
+    a config with top-level ``ssh`` but no active target is old persistent state,
+    not an internal projection, and is safe to retire.
+    """
+    cfg = targets.read_vcp_config()
+    if targets.active_target(cfg) or "ssh" not in cfg:
+        return
+    cfg.pop("ssh", None)
+    targets.write_json(targets.real_vcp_config_path(), cfg)
+    print("[sl] Removed obsolete legacy/default VCP SSH mapping.", file=sys.stderr)
+
+
 def entrypoint(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     projection: Path | None = None
@@ -152,6 +167,8 @@ def entrypoint(argv: Sequence[str] | None = None) -> int:
         configured = _configure_ssh_via_vcp(args)
         if configured is not None:
             return configured
+
+        _discard_unselected_legacy_ssh()
 
         forwarded, explicit = targets.consume_global_target(args)
         recorded = targets.job_target(forwarded)
