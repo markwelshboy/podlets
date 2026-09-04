@@ -15,6 +15,11 @@ DEFAULT_VCP_CONFIG = "~/.config/vcp/config.json"
 DEFAULT_SL_CONFIG = "~/.config/sl/config.json"
 DEFAULT_STATE_DIR = "~/.local/state/sl/jobs"
 
+SSH_OPTIONS_WITH_VALUE = {
+    "-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J",
+    "-L", "-l", "-m", "-O", "-o", "-p", "-Q", "-R", "-S", "-W", "-w",
+}
+
 
 class TargetError(RuntimeError):
     pass
@@ -88,26 +93,67 @@ def target_entry(cfg: dict[str, Any], name: str) -> dict[str, Any]:
     return entry
 
 
+def split_ssh_args(value: Any) -> tuple[list[str], str]:
+    if not isinstance(value, list) or not value or not all(isinstance(x, str) and x for x in value):
+        raise TargetError("SSH arguments must be a non-empty list of strings")
+    args = list(value)
+    options: list[str] = []
+    destination: str | None = None
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg.startswith("-") and arg != "-":
+            options.append(arg)
+            if arg in SSH_OPTIONS_WITH_VALUE:
+                if i + 1 >= len(args):
+                    raise TargetError(f"SSH option {arg} requires a value")
+                options.append(args[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+        if destination is not None:
+            raise TargetError("VCP SSH configuration must contain exactly one destination")
+        destination = arg
+        i += 1
+    if not destination:
+        raise TargetError("SSH configuration has no destination")
+    return options, destination
+
+
+def normalize_ssh_args(value: Any) -> list[str]:
+    options, destination = split_ssh_args(value)
+    return [*options, destination]
+
+
 def set_active_target(name: str, environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     cfg = read_vcp_config(environ)
     name = validate_target_name(name)
     entry = target_entry(cfg, name)
     cfg["active_target"] = name
     cfg["version"] = max(int(cfg.get("version") or 1), 2)
+    cfg.pop("ssh", None)
     write_json(real_vcp_config_path(environ), cfg)
     return entry
 
 
 def endpoint_from_ssh(value: Any) -> str:
-    if not isinstance(value, list) or not value:
+    try:
+        options, destination = split_ssh_args(value)
+    except TargetError:
         return "-"
-    args = [str(x) for x in value]
-    host = args[-1]
     port = None
-    for i, arg in enumerate(args[:-1]):
-        if arg == "-p" and i + 1 < len(args):
-            port = args[i + 1]
-    return f"{host}:{port}" if port else host
+    i = 0
+    while i < len(options):
+        arg = options[i]
+        if arg == "-p" and i + 1 < len(options):
+            port = options[i + 1]
+            i += 2
+            continue
+        if arg.startswith("-p") and len(arg) > 2:
+            port = arg[2:]
+        i += 1
+    return f"{destination}:{port}" if port else destination
 
 
 def print_targets(environ: Mapping[str, str] | None = None) -> int:
@@ -115,19 +161,19 @@ def print_targets(environ: Mapping[str, str] | None = None) -> int:
     entries = target_entries(cfg)
     active = active_target(cfg)
     print(f"VCP config:    {real_vcp_config_path(environ)}")
-    print(f"Active target: {active or ('<legacy/default>' if cfg.get('ssh') else '<none>')}")
+    print(f"Active target: {active or '<none>'}")
     if not entries:
         print("Targets:       <none>")
         return 0
     print()
-    print(f"{'NAME':<24} {'ACTIVE':<7} {'POD ID':<20} {'ENDPOINT':<34} DESCRIPTION")
-    print("-" * 100)
+    print(f"{'NAME':<32} {'ACTIVE':<7} {'POD ID':<20} {'ENDPOINT':<36} DESCRIPTION")
+    print("-" * 108)
     for name, entry in sorted(entries.items()):
         marker = "yes" if name == active else ""
         pod_id = str(entry.get("pod_id") or "-")
         endpoint = endpoint_from_ssh(entry.get("ssh"))
         description = str(entry.get("description") or "")
-        print(f"{name:<24.24} {marker:<7.7} {pod_id:<20.20} {endpoint:<34.34} {description}")
+        print(f"{name:<32.32} {marker:<7.7} {pod_id:<20.20} {endpoint:<36.36} {description}")
     return 0
 
 
@@ -195,19 +241,21 @@ def create_projection(
     name: str,
     environ: Mapping[str, str] | None = None,
 ) -> Path:
-    """Create a temporary legacy-style VCP config for the selected target.
+    """Create a temporary compatibility config for exactly one named target.
 
-    podlets' existing transport code reads the top-level `ssh` field directly.
-    Projecting the named target into that field lets the existing engine stay
-    untouched. Remove active_target/targets so the target-aware vcp launcher
-    invoked by sl cannot re-select a different global target.
+    SL's older transport helpers still read top-level ``ssh`` directly. Keep
+    that field only in the temporary projection, while also projecting the one
+    named target as active so the target-aware VCP launcher resolves the same
+    destination instead of falling back to persistent default state.
     """
     env = environ or os.environ
     cfg = read_vcp_config(env)
-    entry = target_entry(cfg, name)
+    entry = dict(target_entry(cfg, name))
+    entry["ssh"] = normalize_ssh_args(entry["ssh"])
+
     projection = dict(cfg)
-    projection.pop("active_target", None)
-    projection.pop("targets", None)
+    projection["active_target"] = name
+    projection["targets"] = {name: entry}
     projection["ssh"] = list(entry["ssh"])
 
     cache_root = Path(env.get("SL_TARGET_CACHE", "~/.cache/sl/targets")).expanduser()
@@ -223,8 +271,8 @@ def create_projection(
 def configure_active_ssh(
     ssh_args: Sequence[str],
     environ: Mapping[str, str] | None = None,
-) -> str | None:
-    """Update the active named target, or legacy SSH if no named target exists."""
+) -> str:
+    """Update the active named target; unnamed/default SSH state is unsupported."""
     args = [str(x) for x in ssh_args]
     if args and args[0] == "--":
         args = args[1:]
@@ -232,14 +280,16 @@ def configure_active_ssh(
         raise TargetError("usage: sl config ssh [ssh options] user@host")
     cfg = read_vcp_config(environ)
     name = active_target(cfg)
-    if name:
-        entry = target_entry(cfg, name)
-        entry["ssh"] = args
-        raw = cfg.get("targets")
-        assert isinstance(raw, dict)
-        raw[name] = entry
-        write_json(real_vcp_config_path(environ), cfg)
-        return name
-    cfg["ssh"] = args
+    if not name:
+        raise TargetError(
+            "no active VCP target; configure/discover one with 'vcp config ssh ...' "
+            "or select one with 'sl target NAME'"
+        )
+    entry = target_entry(cfg, name)
+    entry["ssh"] = normalize_ssh_args(args)
+    raw = cfg.get("targets")
+    assert isinstance(raw, dict)
+    raw[name] = entry
+    cfg.pop("ssh", None)
     write_json(real_vcp_config_path(environ), cfg)
-    return None
+    return name
